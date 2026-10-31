@@ -321,6 +321,9 @@ func (c *localConn) CloseWrite() error {
 	return nil
 }
 
+// NetConn exposes the socket, so a reset can be passed on (TRN-2).
+func (c *localConn) NetConn() net.Conn { return c.Conn }
+
 func (c *localConn) Close() error {
 	c.once.Do(func() {
 		c.met.StreamEnded(config.LocalPartner, c.mt)

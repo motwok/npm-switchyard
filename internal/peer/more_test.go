@@ -398,6 +398,63 @@ func TestPipeReset(t *testing.T) {
 	}
 }
 
+// Pings are answered and keep the channel up.
+func TestPingPong(t *testing.T) {
+	pairSetup = func(a, b *Manager) { a.pingEvery, b.pingEvery = 20*time.Millisecond, 20*time.Millisecond }
+	a, b := pair(t, true, false)
+	pairSetup = nil
+	time.Sleep(200 * time.Millisecond)
+	if !a.Up(0) || !b.Up(0) {
+		t.Fatal("channel lost under keepalive")
+	}
+}
+
+// A reset on one side reaches the other side as a reset, not as an orderly close (TRN-2).
+func TestPipeResetPropagates(t *testing.T) {
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer l.Close()
+	resetter := make(chan net.Conn, 1)
+	errc := make(chan error, 1)
+	go func() {
+		c, err := l.Accept() // first: the side that resets
+		if err != nil {
+			return
+		}
+		resetter <- c
+		d, err := l.Accept() // second: the side that must see the reset
+		if err != nil {
+			return
+		}
+		_, err = d.Read(make([]byte, 1))
+		errc <- err
+		d.Close()
+	}()
+	x, _ := net.Dial("tcp", l.Addr().String())
+	y, _ := net.Dial("tcp", l.Addr().String())
+	go Pipe(wrapped{y}, x, func(string, int64) {})
+	c := <-resetter
+	_ = c.(*net.TCPConn).SetLinger(0)
+	c.Close()
+	select {
+	case err := <-errc:
+		if err == nil || err == io.EOF {
+			t.Fatalf("reset arrived as %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no reset")
+	}
+	reset(wrapped{wrapped{&net.TCPConn{}}}) // unwraps; a nil TCPConn tolerates SetLinger
+	a, b := net.Pipe()
+	reset(a) // not TCP: nothing to do
+	a.Close()
+	b.Close()
+}
+
+// wrapped hides a socket behind NetConn, as TLS and the exporter's connections do.
+type wrapped struct{ net.Conn }
+
+func (w wrapped) NetConn() net.Conn { return w.Conn }
+
 // setAddr changes where the manager dials partner idx.
 func (m *Manager) setAddr(idx int, a string) {
 	s := m.state[idx]

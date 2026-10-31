@@ -35,6 +35,15 @@ const (
 
 var ErrNoVersion = errors.New("no common protocol version")
 
+// PeerError is a handshake failure after the partner was identified (LOG-2).
+type PeerError struct {
+	Partner int
+	Err     error
+}
+
+func (e *PeerError) Error() string { return e.Err.Error() }
+func (e *PeerError) Unwrap() error { return e.Err }
+
 type InstanceID [16]byte
 
 func NewInstanceID() InstanceID {
@@ -243,18 +252,18 @@ func (l *Local) Accept(raw net.Conn) (*Conn, error) {
 		used = Fingerprint(l.global.PrivateKey.(ed25519.PrivateKey).Public().(ed25519.PublicKey))
 	}
 	if used != want {
-		return nil, errors.New("partner expected a different own key")
+		return nil, &PeerError{idx, errors.New("partner expected a different own key")}
 	}
 	h, err := readHello(c)
 	if err != nil {
-		return nil, err
+		return nil, &PeerError{idx, err}
 	}
 	if _, err := c.Write(hello{l.verMin, l.verMax, l.ID, h.kind}.marshal()); err != nil {
-		return nil, err
+		return nil, &PeerError{idx, err}
 	}
 	v, err := Negotiate(l.verMin, l.verMax, h.verMin, h.verMax)
 	if err != nil {
-		return nil, fmt.Errorf("%w: ours %d-%d, theirs %d-%d", err, l.verMin, l.verMax, h.verMin, h.verMax)
+		return nil, &PeerError{idx, fmt.Errorf("%w: ours %d-%d, theirs %d-%d", err, l.verMin, l.verMax, h.verMin, h.verMax)}
 	}
 	return &Conn{Conn: c, Partner: idx, PeerID: h.id, Version: v, Kind: h.kind, PeerAddr: raw.RemoteAddr()}, nil
 }

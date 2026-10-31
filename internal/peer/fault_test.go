@@ -231,10 +231,12 @@ func TestTieBreakLoser(t *testing.T) {
 	s := m.state[0]
 	p1, p2 := net.Pipe()
 	defer p2.Close()
-	s.ctrl = &wire.Conn{Conn: tls.Client(p1, &tls.Config{}), Dialer: true} // dialed by us (ID 1)
-	newer := &wire.Conn{Conn: tls.Client(p2, &tls.Config{}), PeerID: wire.InstanceID{9}}
-	m.setControl(context.Background(), s, newer) // returns at once, keeps the old channel
-	if s.ctrl.PeerID == newer.PeerID {
+	peerID := wire.InstanceID{9}
+	old := &wire.Conn{Conn: tls.Client(p1, &tls.Config{}), Dialer: true, PeerID: peerID} // dialed by us (ID 1)
+	s.ctrl = old
+	newer := &wire.Conn{Conn: tls.Client(p2, &tls.Config{}), PeerID: peerID} // same instance, dialed by it (ID 9)
+	m.setControl(context.Background(), s, newer)                             // returns at once, keeps the old channel
+	if s.ctrl != old {
 		t.Fatal("loser installed")
 	}
 }

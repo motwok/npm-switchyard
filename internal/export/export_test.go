@@ -172,7 +172,56 @@ func TestRunStopsOnLostStream(t *testing.T) {
 	}
 }
 
-// Older daemons without DNSNames: container name, aliases and short ID still match.
+// A failed refresh is retried until Docker answers again, not only on the next event.
+func TestRefreshRetries(t *testing.T) {
+	port := target(t)
+	f, e := setup(t)
+	e.backoffMin, e.backoffMax = 10*time.Millisecond, 20*time.Millisecond
+	e.mu.Lock()
+	e.targets = map[string][]ref{} // as after a start where the first refresh failed
+	e.mu.Unlock()
+	f.SetListFail(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+	if _, _, st := e.Connect(ctx, wire.Target{Proto: wire.TCP, Port: port, Name: "web"}, all); st == wire.StatusOK {
+		t.Fatal("table filled while Docker fails")
+	}
+	f.SetListFail(false)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, _, st := e.Connect(ctx, wire.Target{Proto: wire.TCP, Port: port, Name: "web"}, all)
+		if st == wire.StatusOK {
+			c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("refresh not retried")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A stalled daemon does not hold the stream: the re-check gives up and the target is refused.
+func TestConnectStalledDaemon(t *testing.T) {
+	port := target(t)
+	f, e := setup(t)
+	old := connectTimeout
+	connectTimeout = 100 * time.Millisecond
+	defer func() { connectTimeout = old }()
+	f.SetStall(true)
+	start := time.Now()
+	if _, _, st := e.Connect(context.Background(), wire.Target{Proto: wire.TCP, Port: port, Name: "web"}, all); st != wire.StatusNoTarget {
+		t.Fatalf("status %d", st)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("re-check not bounded")
+	}
+	f.SetStall(false)
+}
+
+// Docker's default bridge has no DNSNames: container name, aliases and short ID count.
 func TestFallbackNames(t *testing.T) {
 	port := target(t)
 	f, e := setup(t)
@@ -194,8 +243,44 @@ func TestRefConnCloseWritePlain(t *testing.T) {
 	a, b := net.Pipe()
 	defer b.Close()
 	c := &refConn{Conn: a}
-	if c.CloseWrite() != nil {
-		t.Fatal("plain conn CloseWrite")
+	if c.CloseWrite() != nil || c.NetConn() != a {
+		t.Fatal("plain conn CloseWrite or NetConn")
+	}
+	c.Close()
+}
+
+// A second request while one is pending is folded into it.
+func TestNudge(t *testing.T) {
+	kick := make(chan struct{}, 1)
+	nudge(kick)
+	nudge(kick)
+	<-kick
+	select {
+	case <-kick:
+		t.Fatal("two requests queued")
+	default:
+	}
+}
+
+// A container with one endpoint in a shared network and one elsewhere is exported only there.
+func TestOtherEndpointsIgnored(t *testing.T) {
+	port := target(t)
+	f, e := setup(t)
+	f.Set(dockertest.Ctr("two0000000000000", "two", nil, map[string]docker.Endpoint{
+		"apps":  {NetworkID: "n-apps", IPAddress: "127.0.0.1", DNSNames: []string{"two"}},
+		"other": {NetworkID: "n-other", IPAddress: "10.9.9.9", DNSNames: []string{"two"}},
+	}))
+	if err := e.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c, _, st := e.Connect(context.Background(), wire.Target{Proto: wire.TCP, Port: port, Name: "two.other"}, all)
+	if st == wire.StatusOK {
+		c.Close()
+		t.Fatal("name of an unshared network exported")
+	}
+	c, _, st = e.Connect(context.Background(), wire.Target{Proto: wire.TCP, Port: port, Name: "two.apps"}, all)
+	if st != wire.StatusOK {
+		t.Fatalf("status %d", st)
 	}
 	c.Close()
 }
@@ -207,11 +292,11 @@ func TestRefreshErrors(t *testing.T) {
 		t.Fatal("inspect error ignored")
 	}
 	f.FailInspect["web00000000000"] = false
-	f.ListFail = true
+	f.SetListFail(true)
 	if e.Refresh(context.Background()) == nil {
 		t.Fatal("list error ignored")
 	}
-	f.ListFail = false
+	f.SetListFail(false)
 	f.Remove("self0000000000")
 	if e.Refresh(context.Background()) == nil {
 		t.Fatal("missing own container ignored")

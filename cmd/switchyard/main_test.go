@@ -232,8 +232,8 @@ func TestLocalConnCloseWritePlain(t *testing.T) {
 	a, b := net.Pipe()
 	defer b.Close()
 	c := &localConn{Conn: a, met: metrics.New(), untrack: func() {}}
-	if c.CloseWrite() != nil {
-		t.Fatal("plain conn CloseWrite")
+	if c.CloseWrite() != nil || c.NetConn() != a {
+		t.Fatal("plain conn CloseWrite or NetConn")
 	}
 	c.Close()
 }
