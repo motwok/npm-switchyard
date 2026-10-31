@@ -62,6 +62,19 @@ func TestAddAlias(t *testing.T) {
 	}
 }
 
+// Removing an alias tolerates an address that is already gone, nothing else.
+func TestDelAlias(t *testing.T) {
+	ip := net.IPv4(10, 0, 0, 5)
+	fakeNetlink(t, nil, nil, nil, nil, nlMsg(syscall.NLMSG_ERROR, -int32(syscall.EADDRNOTAVAIL)))
+	if err := delAlias(1, ip, 24); err != nil {
+		t.Fatal(err)
+	}
+	fakeNetlink(t, nil, nil, nil, nil, nlMsg(syscall.NLMSG_ERROR, -int32(syscall.EEXIST)))
+	if delAlias(1, ip, 24) == nil {
+		t.Fatal("EEXIST accepted for delete")
+	}
+}
+
 // badLength is a netlink header that claims more bytes than there are.
 func badLength() []byte {
 	b := make([]byte, syscall.NLMSG_HDRLEN)

@@ -21,6 +21,16 @@ var (
 
 // addAlias adds ip/bits to the interface with RTM_NEWADDR (IMP-5).
 func addAlias(ifIndex int, ip net.IP, bits int) error {
+	return ifaddr(syscall.RTM_NEWADDR, syscall.NLM_F_CREATE|syscall.NLM_F_EXCL, syscall.EEXIST, ifIndex, ip, bits)
+}
+
+// delAlias removes ip/bits again with RTM_DELADDR (IMP-7).
+func delAlias(ifIndex int, ip net.IP, bits int) error {
+	return ifaddr(syscall.RTM_DELADDR, 0, syscall.EADDRNOTAVAIL, ifIndex, ip, bits)
+}
+
+// ifaddr sends one address message and waits for the ack; errno okErr counts as success.
+func ifaddr(typ, flags uint16, okErr syscall.Errno, ifIndex int, ip net.IP, bits int) error {
 	ip4 := ip.To4()
 	if ip4 == nil {
 		return errors.New("only IPv4 aliases")
@@ -52,8 +62,8 @@ func addAlias(ifIndex int, ip net.IP, bits int) error {
 	msg := make([]byte, syscall.NLMSG_HDRLEN, syscall.NLMSG_HDRLEN+len(body))
 	msg = append(msg, body...)
 	binary.NativeEndian.PutUint32(msg[0:], uint32(len(msg)))
-	binary.NativeEndian.PutUint16(msg[4:], syscall.RTM_NEWADDR)
-	binary.NativeEndian.PutUint16(msg[6:], syscall.NLM_F_REQUEST|syscall.NLM_F_ACK|syscall.NLM_F_CREATE|syscall.NLM_F_EXCL)
+	binary.NativeEndian.PutUint16(msg[4:], typ)
+	binary.NativeEndian.PutUint16(msg[6:], syscall.NLM_F_REQUEST|syscall.NLM_F_ACK|flags)
 	binary.NativeEndian.PutUint32(msg[8:], 1)
 
 	if err := sysSendto(fd, msg, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
@@ -71,10 +81,10 @@ func addAlias(ifIndex int, ip net.IP, bits int) error {
 	for _, m := range msgs {
 		if m.Header.Type == syscall.NLMSG_ERROR {
 			code := *(*int32)(unsafe.Pointer(&m.Data[0]))
-			if code == 0 || -code == int32(syscall.EEXIST) {
+			if code == 0 || -code == int32(okErr) {
 				return nil
 			}
-			return fmt.Errorf("RTM_NEWADDR %s: %w", ip, syscall.Errno(-code))
+			return fmt.Errorf("address message %d %s: %w", typ, ip, syscall.Errno(-code))
 		}
 	}
 	return nil

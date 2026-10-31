@@ -88,6 +88,7 @@ type Table struct {
 	longIPs []netip.Addr                  // own IP first, then collision aliases, in order
 	taken   map[netip.Addr]map[int]string // ip -> port -> name
 	names   map[string]*Entry
+	joined  map[netip.Addr]bool // addresses containers joined with later; never released (IMP-8)
 }
 
 type Entry struct {
@@ -108,6 +109,7 @@ func NewTable(pool *Pool, own netip.Addr, ownPorts []int) *Table {
 		longIPs: []netip.Addr{own},
 		taken:   map[netip.Addr]map[int]string{own: {}},
 		names:   map[string]*Entry{},
+		joined:  map[netip.Addr]bool{},
 	}
 	for _, p := range ownPorts {
 		t.ownUse[p] = true
@@ -196,6 +198,25 @@ func (t *Table) Short(name string, ports []int) (e *Entry, newAddr bool, added [
 	return e, true, ports, nil
 }
 
+// Undo takes back an entry whose address or listeners could not be set up: a new entry
+// (newAddr) goes entirely, with its address; otherwise only the given ports are unmarked, so
+// the next query tries them again.
+func (t *Table) Undo(e *Entry, newAddr bool, ports []int) {
+	if !newAddr {
+		for _, p := range ports {
+			delete(t.taken[e.Addr], p)
+			delete(e.Ports, p)
+		}
+		return
+	}
+	delete(t.names, e.Name)
+	delete(t.taken, e.Addr)
+	if !e.Short {
+		t.longIPs = t.longIPs[:len(t.longIPs)-1] // Long appends the new address last
+	}
+	t.pool.Release(e.Addr)
+}
+
 // FreeShort puts a short name into quarantine; its listeners are closed by the caller.
 func (t *Table) FreeShort(name string, now time.Time) (*Entry, bool) {
 	e, ok := t.names[name]
@@ -206,15 +227,21 @@ func (t *Table) FreeShort(name string, now time.Time) (*Entry, bool) {
 	return e, true
 }
 
-// Expire releases short names whose quarantine is over.
-func (t *Table) Expire(now time.Time) {
+// Expire releases short names whose quarantine is over and returns their addresses, so the
+// caller can drop the aliases. An address a container joined with meanwhile stays reserved.
+func (t *Table) Expire(now time.Time) []netip.Addr {
+	var out []netip.Addr
 	for n, e := range t.names {
 		if e.Freed() && now.Sub(e.freedAt) >= Quarantine {
 			delete(t.names, n)
 			delete(t.taken, e.Addr)
-			t.pool.Release(e.Addr)
+			if !t.joined[e.Addr] {
+				t.pool.Release(e.Addr)
+			}
+			out = append(out, e.Addr)
 		}
 	}
+	return out
 }
 
 // ShortNames lists active short names.
@@ -231,18 +258,20 @@ func (t *Table) ShortNames() []string {
 func (t *Table) Free() int { return t.pool.Free() }
 
 // Joined handles a container that joined the import network with address a later (IMP-8).
-// It returns the name using a as an alias, if any; a free pool address is reserved.
+// It returns the name using a as an alias, if any. The address is reserved for good, also
+// when a quarantined name still holds it.
 func (t *Table) Joined(a netip.Addr) (string, bool) {
 	if a == t.own {
 		return "", false
+	}
+	if t.pool.Contains(a) {
+		t.pool.Reserve(a)
+		t.joined[a] = true
 	}
 	for n, e := range t.names {
 		if e.Addr == a {
 			return n, true
 		}
-	}
-	if t.pool.Contains(a) {
-		t.pool.Reserve(a)
 	}
 	return "", false
 }
