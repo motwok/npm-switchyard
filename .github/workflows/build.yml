@@ -131,6 +131,11 @@ jobs:
           path: |
             cover.txt
             coverage.html
+      - name: Minimum
+        run: |
+          total=$(go tool cover -func=cover.txt | awk 'END { sub("%", "", $NF); print $NF }')
+          echo "coverage ${total}%, minimum 99%"
+          awk -v t="$total" 'BEGIN { exit !(t >= 99) }'
 
   windows:
     name: Windows (${{ matrix.os }})
