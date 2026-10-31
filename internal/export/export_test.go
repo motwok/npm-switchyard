@@ -188,3 +188,13 @@ func TestFallbackNames(t *testing.T) {
 		c.Close()
 	}
 }
+
+func TestRefConnCloseWritePlain(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	c := &refConn{Conn: a}
+	if c.CloseWrite() != nil {
+		t.Fatal("plain conn CloseWrite")
+	}
+	c.Close()
+}

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -90,5 +91,19 @@ func TestSpareCount(t *testing.T) {
 	}
 	if !ValidLabel("a-b") || ValidLabel("-a") || ValidLabel("") {
 		t.Fatal("labels")
+	}
+}
+
+func TestSourceFiles(t *testing.T) {
+	f := t.TempDir() + "/c.yml"
+	if err := os.WriteFile(f, []byte("listen: 1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, src, err := Source(f, func(string) string { return "" }); err != nil || src != f {
+		t.Fatal(src, err)
+	}
+	env := map[string]string{"SWITCHYARD_CONFIG_FILE": f}
+	if _, src, err := Source("", func(k string) string { return env[k] }); err != nil || src != f {
+		t.Fatal(src, err)
 	}
 }

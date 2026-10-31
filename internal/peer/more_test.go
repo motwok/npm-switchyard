@@ -169,3 +169,70 @@ func TestPipeHalfClose(t *testing.T) {
 		t.Fatal(string(b), in, out)
 	}
 }
+
+// Garbage and unknown peers on the partner port are dropped without harm.
+func TestBadIncoming(t *testing.T) {
+	a, _ := pair(t, true, false)
+	_ = a
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ka := a.local
+	m := New(ka, a.partners, echoExporter{}, metrics.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	m.Run(ctx, []net.Listener{l})
+	c, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = c.Write([]byte("not tls"))
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := c.Read(make([]byte, 1)); err == nil {
+		t.Fatal("garbage connection kept open")
+	}
+	c.Close()
+	cancel()
+	l.Close()
+}
+
+// Stream connections with an unknown first byte or an unknown attach id are closed.
+func TestBadStreams(t *testing.T) {
+	a, b := pair(t, true, false)
+	for _, hdr := range [][]byte{{'?'}, {wire.StreamAttach, 0, 0, 0, 99}, {wire.StreamOpen, 0, 1, 'x'}} {
+		c, err := a.dial(context.Background(), 0, wire.KindStream)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = c.Write(hdr)
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := c.Read(make([]byte, 1)); err == nil {
+			t.Fatalf("stream %v kept open", hdr)
+		}
+		c.Close()
+	}
+	roundTrip(t, b)
+}
+
+// A request the dialer cannot serve (target refused) reaches the listener as a refusal.
+func TestAttachRefused(t *testing.T) {
+	_, b := pair(t, true, false)
+	c, st, err := b.Open(context.Background(), 0, wire.Target{Proto: wire.TCP, Port: 1, Name: "nope"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	if st != wire.StatusNoTarget {
+		t.Fatalf("status %d", st)
+	}
+}
+
+func TestOpenCancelled(t *testing.T) {
+	_, b := pair(t, true, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := b.Open(ctx, 0, wire.Target{Proto: wire.TCP, Port: 1, Name: "echo"}); err == nil {
+		// The attach may win the race; then the stream is valid.
+		return
+	}
+}

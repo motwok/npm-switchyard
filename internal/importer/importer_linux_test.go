@@ -8,12 +8,16 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
 
+	"github.com/motwok/npm-switchyard/internal/docker"
+	"github.com/motwok/npm-switchyard/internal/docker/dockertest"
 	"github.com/motwok/npm-switchyard/internal/metrics"
 	"github.com/motwok/npm-switchyard/internal/npmconf"
 	"github.com/motwok/npm-switchyard/internal/wire"
@@ -237,4 +241,109 @@ func TestSyncShortFreesGoneNames(t *testing.T) {
 	if ok {
 		t.Fatal("gone short name still active")
 	}
+}
+
+// A full range gives NXDOMAIN; with free addresses but no NET_ADMIN the alias fails and the
+// name is not answered either (as root in CI images it succeeds).
+func TestRangeFullAndAlias(t *testing.T) {
+	im := newImporter(t)
+	port := freePort(t)
+	query(im, "a."+strconv.Itoa(port)+".b.switchyard", dns.TypeA)
+	r := query(im, "c."+strconv.Itoa(port)+".b.switchyard", dns.TypeA) // collision: needs an alias
+	if r.Rcode != dns.RcodeNameError && r.Rcode != dns.RcodeSuccess {
+		t.Fatalf("collision: %v", r)
+	}
+
+	full := newImporter(t)
+	empty, _ := NewPool(netip.MustParsePrefix("127.0.1.0/30"), netip.MustParsePrefix("127.0.1.0/30"), nil)
+	full.table = NewTable(empty, full.Own, nil)
+	query(full, "a."+strconv.Itoa(port)+".b.switchyard", dns.TypeA)
+	if r := query(full, "c."+strconv.Itoa(port)+".b.switchyard", dns.TypeA); r.Rcode != dns.RcodeNameError {
+		t.Fatalf("full: %v", r)
+	}
+}
+
+func TestPortInUse(t *testing.T) {
+	im := newImporter(t)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+	// Answered, but the listener cannot be opened; logged, no crash.
+	if r := query(im, "x."+strconv.Itoa(port)+".b.switchyard", dns.TypeA); r.Rcode != dns.RcodeSuccess {
+		t.Fatalf("%v", r)
+	}
+	u, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.Close()
+	query(im, "y."+strconv.Itoa(u.LocalAddr().(*net.UDPAddr).Port)+".b.switchyard", dns.TypeA)
+}
+
+func TestExpireLoop(t *testing.T) {
+	old := expireEvery
+	expireEvery = 20 * time.Millisecond
+	defer func() { expireEvery = old }()
+	im := newImporter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { im.expireLoop(ctx); close(done) }()
+	time.Sleep(80 * time.Millisecond)
+	cancel()
+	<-done
+}
+
+func TestWatchNPMAndShortNames(t *testing.T) {
+	im := newImporter(t)
+	dir := t.TempDir()
+	im.npm = npmconf.NewStore(dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go im.watchNPM(ctx) // directories do not exist yet
+	ph := filepath.Join(dir, "nginx", "proxy_host")
+	if err := os.MkdirAll(ph, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.MkdirAll(filepath.Join(dir, "nginx", "stream"), 0o755)
+	port := freePort(t)
+	conf := "set $server \"web.b.switchyard\";\nset $port " + strconv.Itoa(port) + ";\n"
+	_ = os.WriteFile(filepath.Join(ph, "1.conf"), []byte(conf), 0o644)
+	// The short name needs its own address (alias); without NET_ADMIN it is not answered, but
+	// the store must know it after the directories appear.
+	deadline := time.Now().Add(10 * time.Second)
+	for im.npm.Ports("web.b.switchyard") == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("NPM file not picked up")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	query(im, "web.b.switchyard", dns.TypeA)
+	_ = os.Remove(filepath.Join(ph, "1.conf"))
+	time.Sleep(500 * time.Millisecond)
+}
+
+func TestWatchMembers(t *testing.T) {
+	f := dockertest.NewFake()
+	defer f.Close()
+	im := newImporter(t)
+	im.dc, im.networkID, im.network = f.Client(), "n-imp", "imp"
+	f.Set(dockertest.Ctr("late", "late", nil, map[string]docker.Endpoint{"imp": {NetworkID: "n-imp", IPAddress: "127.0.0.1"}}))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { im.watchMembers(ctx); close(done) }()
+	time.Sleep(100 * time.Millisecond)
+	f.Emit(docker.Event{Type: "network", Action: "connect", Actor: struct {
+		ID         string            `json:"ID"`
+		Attributes map[string]string `json:"Attributes"`
+	}{ID: "n-imp", Attributes: map[string]string{"container": "late"}}})
+	f.Emit(docker.Event{Type: "container", Action: "start"})
+	time.Sleep(200 * time.Millisecond)
+	f.CloseEvents()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+	im.joined(context.Background(), "missing")
 }

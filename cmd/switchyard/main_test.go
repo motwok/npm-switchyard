@@ -222,3 +222,13 @@ func TestServeErrors(t *testing.T) {
 		t.Fatal("unreachable Docker accepted")
 	}
 }
+
+func TestLocalConnCloseWritePlain(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	c := &localConn{Conn: a, met: metrics.New(), untrack: func() {}}
+	if c.CloseWrite() != nil {
+		t.Fatal("plain conn CloseWrite")
+	}
+	c.Close()
+}

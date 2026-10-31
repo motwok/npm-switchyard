@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +28,9 @@ const (
 	ttlPositive = 60
 	ttlNegative = 5
 )
+
+// expireEvery is how often quarantined short names are released.
+var expireEvery = time.Minute
 
 // Importer is the import side on Linux.
 type Importer struct {
@@ -226,7 +228,7 @@ func (im *Importer) Serve(ctx context.Context, ready chan<- struct{}) error {
 }
 
 func (im *Importer) expireLoop(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(expireEvery)
 	defer t.Stop()
 	for {
 		select {
@@ -560,6 +562,3 @@ func (im *Importer) writeUDP(s net.Conn, local bool, p []byte) error {
 	}
 	return wire.WriteDatagram(s, p)
 }
-
-// String helps logs.
-func (im *Importer) String() string { return im.Own.String() + "/" + strconv.Itoa(im.bits) }
