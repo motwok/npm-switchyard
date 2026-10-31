@@ -174,7 +174,7 @@ jobs:
           api=https://ghcr.io/v2/motwok/npm-switchyard
           tok=$(curl -fsS -u "${{ github.actor }}:$GH_TOKEN" \
             "https://ghcr.io/token?scope=repository:motwok/npm-switchyard:pull,push" | jq -r .token)
-          get() { curl -fsS -H "Authorization: Bearer $tok" -H "Accept: $2" "$api/$1"; }
+          get() { curl -fsSL -H "Authorization: Bearer $tok" -H "Accept: $2" "$api/$1"; }
           IDX=application/vnd.oci.image.index.v1+json
           MAN=application/vnd.oci.image.manifest.v1+json
           entries=$(get "manifests/$V-linux" "$IDX" | jq -c '[.manifests[] | select(.platform.os=="linux")]')
