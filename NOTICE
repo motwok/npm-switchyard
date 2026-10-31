@@ -1,0 +1,21 @@
+npm-switchyard
+Copyright (c) Emmo Emminghaus mo2000 at mo2000 dot de
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See the LICENSE file for the full text.
+
+--------------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------------
+
+npm-switchyard is written in Go. The binary contains:
+
+- the Go standard library, BSD-3-Clause license, Copyright The Go Authors.
+- gopkg.in/yaml.v3, MIT and Apache-2.0 licenses.
+- github.com/miekg/dns, BSD-3-Clause license.
+- github.com/Microsoft/go-winio (Windows binary only), MIT license.
+
+The Linux images are built FROM scratch and contain only the npm-switchyard
+binary. The Windows images are based on Microsoft Nano Server.

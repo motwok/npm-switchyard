@@ -1,0 +1,105 @@
+name: Bug report
+description: Report something that doesn't work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill in the fields below;
+        the details make it much easier to reproduce and fix. Remove host names,
+        addresses or container names you do not want to make public.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you start
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+        - label: This is **not** a security vulnerability (those go through [SECURITY.md](https://github.com/motwok/npm-switchyard/security/advisories/new), not a public issue).
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What went wrong, and what did you expect instead?
+      placeholder: The name does not resolve / the connection is reset / the partner does not connect / ...
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: symptoms
+    attributes:
+      label: Symptoms
+      description: Which did you observe?
+      options:
+        - label: The partner connection does not come up
+        - label: A name does not resolve
+        - label: The name resolves, but the connection fails or is reset
+        - label: A container that shares a network with the agent is not offered
+        - label: The container does not start or /metrics does not answer
+        - label: Other (describe above)
+
+  - type: input
+    id: version
+    attributes:
+      label: npm-switchyard version
+      description: Image tag or digest.
+      placeholder: e.g. 1.2.3 or sha256:...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: side
+    attributes:
+      label: Which side shows the problem?
+      options:
+        - importing side (where the name is resolved)
+        - exporting side (where the target container runs)
+        - both / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: platforms
+    attributes:
+      label: Platforms of both hosts
+      description: Linux (amd64/arm64, `uname -r`) or Windows (version and build), and the Docker version of each.
+      placeholder: e.g. Linux arm64 6.12 Docker 28 / Windows Server 2022 Docker 27
+    validations:
+      required: true
+
+  - type: input
+    id: name
+    attributes:
+      label: Name used
+      description: The name of the form `<container>.<port>.<partner>.switchyard` or `<container>.<partner>.switchyard`.
+      placeholder: e.g. nextcloud.8080.hostb.switchyard
+    validations:
+      required: false
+
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Relevant /metrics lines and container logs
+      description: The affected series and the output of `docker logs <container>` of both agents.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Even rough steps help.
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Compose file excerpt, screenshots, anything else.
+    validations:
+      required: false

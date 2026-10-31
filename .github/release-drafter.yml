@@ -1,0 +1,61 @@
+# Release notes and next version from PR labels. The Build workflow publishes
+# the draft when the image changed (see RELEASING.md).
+
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+categories:
+  - type: 'pre-exclude'
+    when:
+      label: 'skip-changelog'
+  - title: 'Features'
+    when:
+      labels: ['feature', 'enhancement']
+  - title: 'Bug Fixes'
+    when:
+      labels: ['fix', 'bug']
+  - title: 'Documentation'
+    when:
+      labels: ['docs', 'documentation']
+  - title: 'Maintenance'
+    when:
+      labels: ['chore', 'dependencies']
+  - type: 'version-resolver'
+    semver-increment: 'major'
+    when:
+      labels: ['major', 'breaking']
+  - type: 'version-resolver'
+    semver-increment: 'minor'
+    when:
+      labels: ['minor', 'feature', 'enhancement']
+  - type: 'version-resolver'
+    semver-increment: 'patch'
+    when:
+      labels: ['patch', 'fix', 'bug', 'docs', 'documentation', 'chore', 'dependencies']
+
+version-resolver:
+  default: patch
+
+change-template: '- $TITLE (#$NUMBER)'
+change-title-escapes: '\<*_&'
+
+template: |
+  $CHANGES
+
+  **Full changelog:** https://github.com/motwok/npm-switchyard/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
+
+autolabeler:
+  - label: 'feature'
+    title: ['/^feat(\(.+\))?!?:/i']
+    branch: ['/^feat(ure)?\//i']
+  - label: 'fix'
+    title: ['/^fix(\(.+\))?!?:/i']
+    branch: ['/^fix\//i']
+  - label: 'docs'
+    title: ['/^docs(\(.+\))?:/i']
+    branch: ['/^docs\//i']
+  - label: 'chore'
+    title: ['/^(chore|build|ci|refactor|perf|style|test)(\(.+\))?:/i']
+    branch: ['/^(chore|build|ci|refactor)\//i']
+  - label: 'breaking'
+    title: ['/!:/', '/breaking[- ]change/i']
