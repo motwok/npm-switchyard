@@ -3,6 +3,7 @@ package peer
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"io"
 	"log/slog"
 	"net"
@@ -50,12 +51,13 @@ func echoServer(t *testing.T) string {
 
 func pair(t *testing.T, aDials, bDials bool) (*Manager, *Manager) {
 	t.Helper()
-	key := bytes.Repeat([]byte{7}, 32)
+	ka := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))
+	kb := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{8}, 32))
 	la, _ := net.Listen("tcp", "127.0.0.1:0")
 	lb, _ := net.Listen("tcp", "127.0.0.1:0")
 	t.Cleanup(func() { la.Close(); lb.Close() })
-	pa := config.Partner{Name: "b", Key: key}
-	pb := config.Partner{Name: "a", Key: key}
+	pa := config.Partner{Name: "b", Own: ka, Peer: kb.Public().(ed25519.PublicKey)}
+	pb := config.Partner{Name: "a", Own: kb, Peer: ka.Public().(ed25519.PublicKey)}
 	if aDials {
 		pa.Address = lb.Addr().String()
 	}
@@ -64,8 +66,8 @@ func pair(t *testing.T, aDials, bDials bool) (*Manager, *Manager) {
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	exp := echoExporter{echoServer(t)}
-	loA, _ := wire.NewLocal()
-	loB, _ := wire.NewLocal()
+	loA, _ := wire.NewLocal(ka, []wire.Partner{{Own: ka, Peer: pa.Peer}})
+	loB, _ := wire.NewLocal(kb, []wire.Partner{{Own: kb, Peer: pb.Peer}})
 	a := New(loA, []config.Partner{pa}, exp, metrics.New(), log)
 	b := New(loB, []config.Partner{pb}, exp, metrics.New(), log)
 	ctx, cancel := context.WithCancel(context.Background())

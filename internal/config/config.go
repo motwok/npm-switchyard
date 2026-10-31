@@ -3,7 +3,7 @@ package config
 
 import (
 	"bytes"
-	"encoding/base64"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"os"
@@ -18,17 +18,18 @@ const (
 	DefaultMetrics = 9480
 	DefaultNPMData = "/npm"
 	DefaultSpares  = 2
-	MinPSKBytes    = 32
 	LocalPartner   = "local"
 )
 
 type Partner struct {
-	Name    string `yaml:"name"`
-	Address string `yaml:"address"`
-	PSK     string `yaml:"psk"`
-	Spares  *int   `yaml:"spares"`
+	Name       string `yaml:"name"`
+	Address    string `yaml:"address"`
+	PublicKey  string `yaml:"public_key"`
+	PrivateKey string `yaml:"private_key"` // overrides the global key for this partner
+	Spares     *int   `yaml:"spares"`
 
-	Key []byte `yaml:"-"`
+	Own  ed25519.PrivateKey `yaml:"-"` // own key towards this partner
+	Peer ed25519.PublicKey  `yaml:"-"`
 }
 
 func (p Partner) SpareCount() int {
@@ -44,7 +45,10 @@ type Config struct {
 	Metrics       int       `yaml:"metrics"`
 	NPMData       string    `yaml:"npm_data"`
 	LogLevel      string    `yaml:"log_level"`
+	PrivateKey    string    `yaml:"private_key"`
 	Partners      []Partner `yaml:"partners"`
+
+	Key ed25519.PrivateKey `yaml:"-"`
 }
 
 // Source resolves CFG-1: flag, then SWITCHYARD_CONFIG_FILE, then SWITCHYARD_CONFIG.
@@ -102,8 +106,13 @@ func (c *Config) validate() error {
 	if c.Listen == c.Metrics {
 		return errors.New("listen and metrics use the same port")
 	}
+	key, err := ParsePrivateKey(c.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("private_key: %w", err)
+	}
+	c.Key = key
 	names := map[string]bool{}
-	keys := map[string]string{}
+	peers := map[string]string{}
 	for i := range c.Partners {
 		p := &c.Partners[i]
 		p.Name = strings.ToLower(p.Name)
@@ -114,21 +123,19 @@ func (c *Config) validate() error {
 			return fmt.Errorf("partner %q: used twice", p.Name)
 		}
 		names[p.Name] = true
-		key, err := base64.StdEncoding.DecodeString(p.PSK)
-		if err != nil {
-			key, err = base64.RawStdEncoding.DecodeString(p.PSK)
+		if p.Peer, err = ParsePublicKey(p.PublicKey); err != nil {
+			return fmt.Errorf("partner %q: public_key: %w", p.Name, err)
 		}
-		if err != nil {
-			return fmt.Errorf("partner %q: psk is not base64", p.Name)
+		if other, ok := peers[string(p.Peer)]; ok {
+			return fmt.Errorf("partners %q and %q: same public_key", other, p.Name)
 		}
-		if len(key) < MinPSKBytes {
-			return fmt.Errorf("partner %q: psk has %d bytes, need %d", p.Name, len(key), MinPSKBytes)
+		peers[string(p.Peer)] = p.Name
+		p.Own = c.Key
+		if p.PrivateKey != "" {
+			if p.Own, err = ParsePrivateKey(p.PrivateKey); err != nil {
+				return fmt.Errorf("partner %q: private_key: %w", p.Name, err)
+			}
 		}
-		if other, ok := keys[string(key)]; ok {
-			return fmt.Errorf("partners %q and %q: same psk", other, p.Name)
-		}
-		keys[string(key)] = p.Name
-		p.Key = key
 		if p.Spares != nil && *p.Spares < 0 {
 			return fmt.Errorf("partner %q: spares < 0", p.Name)
 		}

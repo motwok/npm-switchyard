@@ -2,26 +2,26 @@
 package wire
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/hmac"
+	"bytes"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base32"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"net"
+	"strings"
 	"time"
 )
 
 const (
 	magic        = "NSY1"
-	ekmLabel     = "EXPORTER-npm-switchyard"
 	VersionMin   = 1
 	VersionMax   = 1
 	handshakeTTL = 15 * time.Second
@@ -93,19 +93,22 @@ func Negotiate(aMin, aMax, bMin, bMax uint16) (uint16, error) {
 	return v, nil
 }
 
-// Proof is HMAC-SHA256(psk, role || ekm); the role stops reflection of the peer's proof.
-func Proof(psk []byte, role string, ekm []byte) []byte {
-	m := hmac.New(sha256.New, psk)
-	m.Write([]byte(role))
-	m.Write([]byte{0})
-	m.Write(ekm)
-	return m.Sum(nil)
+// Fingerprint names a public key in SNI (PAR-2): "k" + base32 of 15 bytes of its SHA-256.
+func Fingerprint(pub ed25519.PublicKey) string {
+	h := sha256.Sum256(pub)
+	return "k" + strings.ToLower(base32.StdEncoding.EncodeToString(h[:15]))
+}
+
+// Partner is one pair's keys: the own key towards it and its pinned public key.
+type Partner struct {
+	Own  ed25519.PrivateKey
+	Peer ed25519.PublicKey
 }
 
 // Conn is an authenticated connection.
 type Conn struct {
 	*tls.Conn
-	Partner  int // index into the key list
+	Partner  int
 	PeerID   InstanceID
 	Version  uint16
 	Kind     byte
@@ -113,102 +116,137 @@ type Conn struct {
 	PeerAddr net.Addr
 }
 
-// Local holds this agent's identity for handshakes.
+// Local holds this agent's identities for handshakes.
 type Local struct {
-	ID   InstanceID
-	cert tls.Certificate
+	ID       InstanceID
+	partners []Partner
+	certs    map[string]tls.Certificate // fingerprint of own public key -> certificate
+	global   tls.Certificate
+	byPeer   map[string]int // peer public key -> partner index
 }
 
-func NewLocal() (*Local, error) {
-	cert, err := selfSigned()
+func NewLocal(global ed25519.PrivateKey, partners []Partner) (*Local, error) {
+	l := &Local{ID: NewInstanceID(), partners: partners, certs: map[string]tls.Certificate{}, byPeer: map[string]int{}}
+	var err error
+	if l.global, err = certFor(global); err != nil {
+		return nil, err
+	}
+	l.certs[Fingerprint(global.Public().(ed25519.PublicKey))] = l.global
+	for i, p := range partners {
+		fp := Fingerprint(p.Own.Public().(ed25519.PublicKey))
+		if _, ok := l.certs[fp]; !ok {
+			c, err := certFor(p.Own)
+			if err != nil {
+				return nil, err
+			}
+			l.certs[fp] = c
+		}
+		l.byPeer[string(p.Peer)] = i
+	}
+	return l, nil
+}
+
+func leafKey(raw [][]byte) (ed25519.PublicKey, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("no certificate")
+	}
+	c, err := x509.ParseCertificate(raw[0])
 	if err != nil {
 		return nil, err
 	}
-	return &Local{ID: NewInstanceID(), cert: cert}, nil
+	k, ok := c.PublicKey.(ed25519.PublicKey)
+	if !ok {
+		return nil, errors.New("certificate key is not Ed25519")
+	}
+	return k, nil
 }
 
-func (l *Local) serverConfig() *tls.Config {
-	return &tls.Config{Certificates: []tls.Certificate{l.cert}, MinVersion: tls.VersionTLS13}
-}
-
-func (l *Local) clientConfig() *tls.Config {
-	// Server identity is proven by the PSK, not the certificate.
-	return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13} //nolint:gosec
-}
-
-func ekm(c *tls.Conn) ([]byte, error) {
-	st := c.ConnectionState()
-	return st.ExportKeyingMaterial(ekmLabel, nil, 32)
-}
-
-// Dial authenticates as dialer with one known key.
-func (l *Local) Dial(raw net.Conn, key []byte, kind byte) (*Conn, error) {
+// Dial authenticates as dialer towards partner idx.
+func (l *Local) Dial(raw net.Conn, idx int, kind byte) (*Conn, error) {
 	_ = raw.SetDeadline(time.Now().Add(handshakeTTL))
 	defer raw.SetDeadline(time.Time{})
-	c := tls.Client(raw, l.clientConfig())
+	p := l.partners[idx]
+	cert := l.certs[Fingerprint(p.Own.Public().(ed25519.PublicKey))]
+	cfg := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{cert},
+		ServerName:   Fingerprint(p.Peer),
+		// Trust comes from the pinned key, not from a CA.
+		InsecureSkipVerify: true, //nolint:gosec
+		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
+			k, err := leafKey(raw)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(k, p.Peer) {
+				return errors.New("partner key does not match public_key")
+			}
+			return nil
+		},
+	}
+	c := tls.Client(raw, cfg)
 	if err := c.Handshake(); err != nil {
 		return nil, err
 	}
-	m, err := ekm(c)
-	if err != nil {
-		return nil, err
-	}
-	out := hello{VersionMin, VersionMax, l.ID, kind}.marshal()
-	out = append(out, Proof(key, "dialer", m)...)
-	if _, err := c.Write(out); err != nil {
+	if _, err := c.Write(hello{VersionMin, VersionMax, l.ID, kind}.marshal()); err != nil {
 		return nil, err
 	}
 	h, err := readHello(c)
 	if err != nil {
 		return nil, err
-	}
-	p := make([]byte, sha256.Size)
-	if _, err := io.ReadFull(c, p); err != nil {
-		return nil, err
-	}
-	if !hmac.Equal(p, Proof(key, "listener", m)) {
-		return nil, errors.New("partner proof invalid")
 	}
 	v, err := Negotiate(VersionMin, VersionMax, h.verMin, h.verMax)
 	if err != nil {
 		return nil, fmt.Errorf("%w: ours %d-%d, theirs %d-%d", err, VersionMin, VersionMax, h.verMin, h.verMax)
 	}
-	return &Conn{Conn: c, PeerID: h.id, Version: v, Kind: kind, Dialer: true, PeerAddr: raw.RemoteAddr()}, nil
+	return &Conn{Conn: c, Partner: idx, PeerID: h.id, Version: v, Kind: kind, Dialer: true, PeerAddr: raw.RemoteAddr()}, nil
 }
 
-// Accept authenticates as listener, trying every key (PAR-2).
-func (l *Local) Accept(raw net.Conn, keys [][]byte) (*Conn, error) {
+// Accept authenticates as listener and identifies the partner by its key (PAR-2).
+func (l *Local) Accept(raw net.Conn) (*Conn, error) {
 	_ = raw.SetDeadline(time.Now().Add(handshakeTTL))
 	defer raw.SetDeadline(time.Time{})
-	c := tls.Server(raw, l.serverConfig())
+	var used string
+	cfg := &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		ClientAuth: tls.RequireAnyClientCert,
+		GetCertificate: func(h *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			used = h.ServerName
+			if c, ok := l.certs[h.ServerName]; ok {
+				return &c, nil
+			}
+			used = ""
+			return &l.global, nil
+		},
+		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
+			k, err := leafKey(raw)
+			if err != nil {
+				return err
+			}
+			if _, ok := l.byPeer[string(k)]; !ok {
+				return errors.New("unknown partner key")
+			}
+			return nil
+		},
+	}
+	c := tls.Server(raw, cfg)
 	if err := c.Handshake(); err != nil {
 		return nil, err
 	}
-	m, err := ekm(c)
-	if err != nil {
-		return nil, err
+	k := c.ConnectionState().PeerCertificates[0].PublicKey.(ed25519.PublicKey)
+	idx := l.byPeer[string(k)]
+	want := Fingerprint(l.partners[idx].Own.Public().(ed25519.PublicKey))
+	if used == "" {
+		used = Fingerprint(l.global.PrivateKey.(ed25519.PrivateKey).Public().(ed25519.PublicKey))
+	}
+	if used != want {
+		return nil, errors.New("partner expected a different own key")
 	}
 	h, err := readHello(c)
 	if err != nil {
 		return nil, err
 	}
-	p := make([]byte, sha256.Size)
-	if _, err := io.ReadFull(c, p); err != nil {
-		return nil, err
-	}
-	idx := -1
-	for i, k := range keys {
-		if hmac.Equal(p, Proof(k, "dialer", m)) {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return nil, errors.New("no configured psk matches")
-	}
-	out := hello{VersionMin, VersionMax, l.ID, h.kind}.marshal()
-	out = append(out, Proof(keys[idx], "listener", m)...)
-	if _, err := c.Write(out); err != nil {
+	if _, err := c.Write(hello{VersionMin, VersionMax, l.ID, h.kind}.marshal()); err != nil {
 		return nil, err
 	}
 	v, err := Negotiate(VersionMin, VersionMax, h.verMin, h.verMax)
@@ -218,11 +256,7 @@ func (l *Local) Accept(raw net.Conn, keys [][]byte) (*Conn, error) {
 	return &Conn{Conn: c, Partner: idx, PeerID: h.id, Version: v, Kind: h.kind, PeerAddr: raw.RemoteAddr()}, nil
 }
 
-func selfSigned() (tls.Certificate, error) {
-	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
+func certFor(k ed25519.PrivateKey) (tls.Certificate, error) {
 	serial, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
@@ -230,9 +264,9 @@ func selfSigned() (tls.Certificate, error) {
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(100 * 365 * 24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, k.Public(), k)
 	if err != nil {
 		return tls.Certificate{}, err
 	}

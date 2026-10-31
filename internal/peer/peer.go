@@ -38,7 +38,6 @@ type Exporter interface {
 type Manager struct {
 	local    *wire.Local
 	partners []config.Partner
-	keys     [][]byte
 	exp      Exporter
 	met      *metrics.Registry
 	log      *slog.Logger
@@ -63,7 +62,6 @@ type partnerState struct {
 func New(local *wire.Local, partners []config.Partner, exp Exporter, met *metrics.Registry, log *slog.Logger) *Manager {
 	m := &Manager{local: local, partners: partners, exp: exp, met: met, log: log}
 	for i, p := range partners {
-		m.keys = append(m.keys, p.Key)
 		m.state = append(m.state, &partnerState{idx: i, name: p.Name, pending: map[uint32]chan *wire.Conn{}})
 		met.SetPeerUp(p.Name, false)
 	}
@@ -115,7 +113,7 @@ func (m *Manager) acceptLoop(ctx context.Context, l net.Listener) {
 }
 
 func (m *Manager) handleIncoming(ctx context.Context, raw net.Conn) {
-	c, err := m.local.Accept(raw, m.keys)
+	c, err := m.local.Accept(raw)
 	if err != nil {
 		m.log.Warn("partner handshake failed", "remote", raw.RemoteAddr(), "err", err)
 		raw.Close()
@@ -166,7 +164,7 @@ func (m *Manager) dial(ctx context.Context, idx int, kind byte) (*wire.Conn, err
 	if err != nil {
 		return nil, err
 	}
-	c, err := m.local.Dial(raw, m.partners[idx].Key, kind)
+	c, err := m.local.Dial(raw, idx, kind)
 	if err != nil {
 		raw.Close()
 		return nil, err

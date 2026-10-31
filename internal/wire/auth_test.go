@@ -2,82 +2,106 @@ package wire
 
 import (
 	"bytes"
-	"crypto/sha256"
+	"crypto/ed25519"
 	"io"
 	"net"
 	"testing"
 )
 
-var keyA = bytes.Repeat([]byte{1}, 32)
-var keyB = bytes.Repeat([]byte{2}, 32)
+func key(b byte) ed25519.PrivateKey { return ed25519.NewKeyFromSeed(bytes.Repeat([]byte{b}, 32)) }
 
-func TestHandshake(t *testing.T) {
-	dl, _ := NewLocal()
-	ll, _ := NewLocal()
-	c1, c2 := net.Pipe()
-	type res struct {
-		c   *Conn
-		err error
-	}
-	ch := make(chan res, 1)
-	go func() {
-		c, err := ll.Accept(c2, [][]byte{keyA, keyB})
-		ch <- res{c, err}
-	}()
-	d, err := dl.Dial(c1, keyB, KindControl)
+func pub(k ed25519.PrivateKey) ed25519.PublicKey { return k.Public().(ed25519.PublicKey) }
+
+type result struct {
+	c   *Conn
+	err error
+}
+
+func handshake(t *testing.T, d *Local, idx int, l *Local) (*Conn, error, result) {
+	t.Helper()
+	// Real sockets: net.Pipe is unbuffered and stalls on TLS alerts until the deadline.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := <-ch
-	if r.err != nil {
-		t.Fatal(r.err)
+	defer ln.Close()
+	c1, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if r.c.Partner != 1 || r.c.Kind != KindControl || r.c.PeerID != dl.ID || d.PeerID != ll.ID || !d.Dialer {
+	c2, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := make(chan result, 1)
+	go func() {
+		c, err := l.Accept(c2)
+		if err != nil {
+			c2.Close()
+		}
+		ch <- result{c, err}
+	}()
+	dc, err := d.Dial(c1, idx, KindControl)
+	if err != nil {
+		c1.Close()
+	}
+	return dc, err, <-ch
+}
+
+func TestHandshake(t *testing.T) {
+	a, b, x := key(1), key(2), key(3)
+	// b knows partners x (index 0) and a (index 1).
+	la, _ := NewLocal(a, []Partner{{Own: a, Peer: pub(b)}})
+	lb, _ := NewLocal(b, []Partner{{Own: b, Peer: pub(x)}, {Own: b, Peer: pub(a)}})
+	d, err, r := handshake(t, la, 0, lb)
+	if err != nil || r.err != nil {
+		t.Fatal(err, r.err)
+	}
+	if r.c.Partner != 1 || r.c.Kind != KindControl || r.c.PeerID != la.ID || d.PeerID != lb.ID || !d.Dialer {
 		t.Fatalf("listener %+v dialer %+v", r.c, d)
 	}
 	go func() { _, _ = d.Write([]byte("ping")) }()
-	b := make([]byte, 4)
-	if _, err := io.ReadFull(r.c, b); err != nil || string(b) != "ping" {
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(r.c, buf); err != nil || string(buf) != "ping" {
 		t.Fatal(err)
 	}
 }
 
-func TestWrongKey(t *testing.T) {
-	dl, _ := NewLocal()
-	ll, _ := NewLocal()
-	c1, c2 := net.Pipe()
-	go func() {
-		_, _ = ll.Accept(c2, [][]byte{keyA})
-		c2.Close()
-	}()
-	if _, err := dl.Dial(c1, keyB, KindControl); err == nil {
-		t.Fatal("dial with unknown key succeeded")
+func TestWrongListenerKey(t *testing.T) {
+	a, b, x := key(1), key(2), key(3)
+	la, _ := NewLocal(a, []Partner{{Own: a, Peer: pub(x)}}) // expects x, talks to b
+	lb, _ := NewLocal(b, []Partner{{Own: b, Peer: pub(a)}})
+	if _, err, _ := handshake(t, la, 0, lb); err == nil {
+		t.Fatal("dialer accepted an unexpected listener key")
 	}
 }
 
-// A listener without the PSK must not pass by echoing the dialer's proof (PAR-2).
-func TestNoReflection(t *testing.T) {
-	ekm := bytes.Repeat([]byte{9}, 32)
-	if bytes.Equal(Proof(keyA, "dialer", ekm), Proof(keyA, "listener", ekm)) {
-		t.Fatal("proofs of both roles are equal")
+func TestUnknownDialer(t *testing.T) {
+	a, b := key(1), key(2)
+	la, _ := NewLocal(a, []Partner{{Own: a, Peer: pub(b)}})
+	lb, _ := NewLocal(b, []Partner{{Own: b, Peer: pub(key(9))}})
+	if _, _, r := handshake(t, la, 0, lb); r.err == nil {
+		t.Fatal("listener accepted an unknown dialer key")
 	}
-	dl, _ := NewLocal()
-	c1, c2 := net.Pipe()
-	go func() {
-		// Impostor: complete TLS, read the dialer's hello and proof, send them back.
-		il, _ := NewLocal()
-		tc := tlsServer(c2, il)
-		if tc.Handshake() != nil {
-			return
-		}
-		buf := make([]byte, 25+sha256.Size)
-		if _, err := io.ReadFull(tc, buf); err != nil {
-			return
-		}
-		_, _ = tc.Write(buf)
-	}()
-	if _, err := dl.Dial(c1, keyA, KindControl); err == nil {
-		t.Fatal("reflected proof accepted")
+}
+
+// The listener presents its per-partner key, chosen by the SNI fingerprint (PAR-2).
+func TestPerPartnerKey(t *testing.T) {
+	a, b, bForA := key(1), key(2), key(4)
+	la, _ := NewLocal(a, []Partner{{Own: a, Peer: pub(bForA)}})
+	lb, _ := NewLocal(b, []Partner{{Own: bForA, Peer: pub(a)}})
+	if _, err, r := handshake(t, la, 0, lb); err != nil || r.err != nil {
+		t.Fatal(err, r.err)
+	}
+}
+
+// A partner that pins b's global key while b has an own key for it is refused.
+func TestOverrideMismatch(t *testing.T) {
+	a, b, bForA := key(1), key(2), key(4)
+	la, _ := NewLocal(a, []Partner{{Own: a, Peer: pub(b)}})
+	lb, _ := NewLocal(b, []Partner{{Own: bForA, Peer: pub(a)}})
+	if _, _, r := handshake(t, la, 0, lb); r.err == nil {
+		t.Fatal("listener used the global key for a partner with an own key")
 	}
 }
 
@@ -95,6 +119,13 @@ func TestInstanceIDLess(t *testing.T) {
 	b := InstanceID{2}
 	if !a.Less(b) || b.Less(a) || a.Less(a) {
 		t.Fatal("Less")
+	}
+}
+
+func TestFingerprint(t *testing.T) {
+	f := Fingerprint(pub(key(1)))
+	if len(f) != 25 || f[0] != 'k' || f != Fingerprint(pub(key(1))) || f == Fingerprint(pub(key(2))) {
+		t.Fatal(f)
 	}
 }
 

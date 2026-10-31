@@ -5,42 +5,70 @@ import (
 	"testing"
 )
 
-const psk1 = "q83vEi4DQ+X0g7yW1o0f3o8Yv2s6s7b3H3r3nqk6c4k="
-const psk2 = "Zm9vYmFyYmF6cXV4cXV1eHF1dXhxdXV4cXV1eHF1dXg="
+var (
+	own   = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+	peer  = "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w="
+	peer2 = "yFQXL7bB0dkYQWrHRlz1CMYiNQ7S5O5JWbqvnmqUv8U="
+	head  = "private_key: " + own + "\n"
+)
 
 func TestDefaults(t *testing.T) {
-	c, err := Parse([]byte("partners:\n  - name: HostB\n    psk: " + psk1 + "\n"))
+	c, err := Parse([]byte(head + "partners:\n  - name: HostB\n    public_key: " + peer + "\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.Listen != 9481 || c.Metrics != 9480 || c.NPMData != "/npm" || c.LogLevel != "info" {
 		t.Fatalf("defaults: %+v", c)
 	}
-	if c.Partners[0].Name != "hostb" || c.Partners[0].SpareCount() != 2 || len(c.Partners[0].Key) != 32 {
-		t.Fatalf("partner: %+v", c.Partners[0])
+	p := c.Partners[0]
+	if p.Name != "hostb" || p.SpareCount() != 2 || len(p.Peer) != 32 || !p.Own.Equal(c.Key) {
+		t.Fatalf("partner: %+v", p)
+	}
+}
+
+func TestOverride(t *testing.T) {
+	other := GenerateKey()
+	c, err := Parse([]byte(head + "partners:\n  - name: b\n    public_key: " + peer + "\n    private_key: " + other + "\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Partners[0].Own.Equal(c.Key) {
+		t.Fatal("per-partner key not used")
 	}
 }
 
 func TestInvalid(t *testing.T) {
 	cases := map[string]string{
-		"unknown key":   "bogus: 1\n",
-		"reserved name": "partners:\n  - name: local\n    psk: " + psk1 + "\n",
-		"port name":     "partners:\n  - name: \"8080\"\n    psk: " + psk1 + "\n",
-		"bad label":     "partners:\n  - name: a_b\n    psk: " + psk1 + "\n",
-		"twice":         "partners:\n  - name: a\n    psk: " + psk1 + "\n  - name: a\n    psk: " + psk2 + "\n",
-		"same psk":      "partners:\n  - name: a\n    psk: " + psk1 + "\n  - name: b\n    psk: " + psk1 + "\n",
-		"short psk":     "partners:\n  - name: a\n    psk: c2hvcnQ=\n",
-		"not base64":    "partners:\n  - name: a\n    psk: \"%%%\"\n",
-		"same ports":    "listen: 9000\nmetrics: 9000\n",
-		"port range":    "listen: 70000\n",
-		"no port":       "partners:\n  - name: a\n    address: hostb\n    psk: " + psk1 + "\n",
-		"log level":     "log_level: loud\n",
-		"neg spares":    "partners:\n  - name: a\n    psk: " + psk1 + "\n    spares: -1\n",
+		"no private key":  "partners: []\n",
+		"bad private key": "private_key: c2hvcnQ=\n",
+		"unknown key":     head + "bogus: 1\n",
+		"reserved name":   head + "partners:\n  - name: local\n    public_key: " + peer + "\n",
+		"port name":       head + "partners:\n  - name: \"8080\"\n    public_key: " + peer + "\n",
+		"bad label":       head + "partners:\n  - name: a_b\n    public_key: " + peer + "\n",
+		"twice":           head + "partners:\n  - name: a\n    public_key: " + peer + "\n  - name: a\n    public_key: " + peer2 + "\n",
+		"same key":        head + "partners:\n  - name: a\n    public_key: " + peer + "\n  - name: b\n    public_key: " + peer + "\n",
+		"no public key":   head + "partners:\n  - name: a\n",
+		"bad override":    head + "partners:\n  - name: a\n    public_key: " + peer + "\n    private_key: x\n",
+		"same ports":      head + "listen: 9000\nmetrics: 9000\n",
+		"port range":      head + "listen: 70000\n",
+		"no port":         head + "partners:\n  - name: a\n    address: hostb\n    public_key: " + peer + "\n",
+		"log level":       head + "log_level: loud\n",
+		"neg spares":      head + "partners:\n  - name: a\n    public_key: " + peer + "\n    spares: -1\n",
 	}
 	for name, y := range cases {
 		if _, err := Parse([]byte(y)); err == nil {
 			t.Errorf("%s: no error", name)
 		}
+	}
+}
+
+func TestKeys(t *testing.T) {
+	k, err := ParsePrivateKey(GenerateKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParsePublicKey(PublicKeyString(k)); err != nil {
+		t.Fatal(err)
 	}
 }
 

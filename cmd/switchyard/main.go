@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -40,10 +41,30 @@ func main() {
 		os.Exit(run(*cfgPath))
 	case "health":
 		os.Exit(health(*cfgPath))
+	case "genkey":
+		fmt.Println(config.GenerateKey())
+	case "pubkey":
+		os.Exit(pubkey())
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", fs.Arg(0))
 		os.Exit(2)
 	}
+}
+
+// pubkey prints the public key of the private key on stdin (CLI-4).
+func pubkey() int {
+	b, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	k, err := config.ParsePrivateKey(string(b))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "private key:", err)
+		return 1
+	}
+	fmt.Println(config.PublicKeyString(k))
+	return 0
 }
 
 func load(path string) (*config.Config, error) {
@@ -90,7 +111,8 @@ func run(path string) int {
 	var lvl slog.Level
 	_ = lvl.UnmarshalText([]byte(cfg.LogLevel))
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
-	log.Info("starting", "version", version, "partners", len(cfg.Partners), "import", cfg.ImportNetwork != "")
+	log.Info("starting", "version", version, "partners", len(cfg.Partners), "import", cfg.ImportNetwork != "",
+		"public_key", config.PublicKeyString(cfg.Key))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -126,7 +148,11 @@ func run(path string) int {
 	exp := export.New(dc, self.ID, cfg.ImportNetwork, log)
 	go exp.Run(ctx)
 
-	local, err := wire.NewLocal()
+	var wp []wire.Partner
+	for _, p := range cfg.Partners {
+		wp = append(wp, wire.Partner{Own: p.Own, Peer: p.Peer})
+	}
+	local, err := wire.NewLocal(cfg.Key, wp)
 	if err != nil {
 		log.Error("tls", "err", err)
 		return 1
