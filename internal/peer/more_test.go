@@ -250,8 +250,8 @@ func (silentExporter) Track(net.Conn, metrics.Target) func() { return func() {} 
 func TestStreamTimeouts(t *testing.T) {
 	oldR, oldS := requestWait, statusTimeout
 	requestWait, statusTimeout = 300*time.Millisecond, 300*time.Millisecond
-	defer func() { requestWait, statusTimeout = oldR, oldS }()
-	a, b := pair(t, true, false)
+	a, b := pair(t, true, false) // the managers copy the short timeouts
+	requestWait, statusTimeout = oldR, oldS
 	ex := silentExporter{make(chan struct{})}
 	defer close(ex.release)
 	a.exp = ex

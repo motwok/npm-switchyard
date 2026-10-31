@@ -46,6 +46,9 @@ type Manager struct {
 	met      *metrics.Registry
 	log      *slog.Logger
 
+	// Copied from the package defaults at New, so tests can shorten them.
+	requestWait, statusTimeout time.Duration
+
 	mu    sync.Mutex
 	state []*partnerState
 }
@@ -64,7 +67,8 @@ type partnerState struct {
 }
 
 func New(local *wire.Local, partners []config.Partner, exp Exporter, met *metrics.Registry, log *slog.Logger) *Manager {
-	m := &Manager{local: local, partners: partners, exp: exp, met: met, log: log}
+	m := &Manager{local: local, partners: partners, exp: exp, met: met, log: log,
+		requestWait: requestWait, statusTimeout: statusTimeout}
 	for i, p := range partners {
 		m.state = append(m.state, &partnerState{idx: i, name: p.Name, pending: map[uint32]chan *wire.Conn{}})
 		met.SetPeerUp(p.Name, false)
@@ -361,7 +365,7 @@ func (m *Manager) Open(ctx context.Context, idx int, t wire.Target) (net.Conn, b
 				return nil, 0, err
 			}
 		}
-		st, err := readStatus(c)
+		st, err := readStatus(c, m.statusTimeout)
 		if err != nil {
 			c.Close()
 			return nil, 0, err
@@ -385,13 +389,13 @@ func (m *Manager) Open(ctx context.Context, idx int, t wire.Target) (net.Conn, b
 	}
 	select {
 	case c := <-ch:
-		st, err := readStatus(c)
+		st, err := readStatus(c, m.statusTimeout)
 		if err != nil {
 			c.Close()
 			return nil, 0, err
 		}
 		return c, st, nil
-	case <-time.After(requestWait):
+	case <-time.After(m.requestWait):
 		return nil, 0, errors.New("partner did not attach")
 	case <-ctx.Done():
 		return nil, 0, ctx.Err()
@@ -460,7 +464,7 @@ func (m *Manager) serveStream(ctx context.Context, s *partnerState, c *wire.Conn
 // export connects the local target and pipes it to the partner stream c.
 func (m *Manager) export(ctx context.Context, s *partnerState, c *wire.Conn, t wire.Target) {
 	target, mt, st := m.exp.Connect(ctx, t, m.partners[s.idx].Networks.Allows)
-	_ = c.SetWriteDeadline(time.Now().Add(statusTimeout))
+	_ = c.SetWriteDeadline(time.Now().Add(m.statusTimeout))
 	if _, err := c.Write([]byte{st}); err != nil || st != wire.StatusOK {
 		result := "refused"
 		if err != nil {
@@ -500,8 +504,8 @@ func readFramed(r io.Reader) ([]byte, error) {
 	return p, err
 }
 
-func readStatus(c *wire.Conn) (byte, error) {
-	_ = c.SetReadDeadline(time.Now().Add(statusTimeout))
+func readStatus(c *wire.Conn, timeout time.Duration) (byte, error) {
+	_ = c.SetReadDeadline(time.Now().Add(timeout))
 	defer c.SetReadDeadline(time.Time{})
 	var b [1]byte
 	if _, err := io.ReadFull(c, b[:]); err != nil {
