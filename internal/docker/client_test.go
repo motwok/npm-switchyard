@@ -3,6 +3,8 @@ package docker_test
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -82,5 +84,21 @@ func TestListLabels(t *testing.T) {
 	list, err := f.Client().Running(context.Background())
 	if err != nil || list[0].Label("k") != "v" || list[0].Label("none") != "" {
 		t.Fatal(list, err)
+	}
+}
+
+func TestEventsErrors(t *testing.T) {
+	f := dockertest.NewFake()
+	defer f.Close()
+	f.EventsFail = true
+	if err := f.Client().Events(context.Background(), func(docker.Event) {}); err == nil {
+		t.Fatal("500 accepted")
+	}
+	dead := docker.NewWithDialer(func(context.Context) (net.Conn, error) { return nil, io.EOF })
+	if err := dead.Events(context.Background(), func(docker.Event) {}); err == nil {
+		t.Fatal("dead daemon accepted")
+	}
+	if _, err := dead.Version(context.Background()); err == nil {
+		t.Fatal("dead daemon version")
 	}
 }

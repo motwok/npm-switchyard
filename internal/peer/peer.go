@@ -18,14 +18,18 @@ import (
 )
 
 const (
-	pingEvery     = 10 * time.Second
-	deadAfter     = 30 * time.Second
-	backoffMin    = time.Second
-	backoffMax    = 30 * time.Second
-	requestWait   = 15 * time.Second
-	dialTimeout   = 10 * time.Second
-	statusTimeout = 15 * time.Second
+	pingEvery   = 10 * time.Second
+	deadAfter   = 30 * time.Second
+	backoffMin  = time.Second
+	backoffMax  = 30 * time.Second
+	dialTimeout = 10 * time.Second
 )
+
+// requestWait bounds how long a listener waits for the dialer to attach a stream.
+var requestWait = 15 * time.Second
+
+// statusTimeout bounds the wait for the exporting side's stream status.
+var statusTimeout = 15 * time.Second
 
 var ErrNotConnected = errors.New("partner not connected")
 

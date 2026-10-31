@@ -232,3 +232,59 @@ func TestLocalConnCloseWritePlain(t *testing.T) {
 	}
 	c.Close()
 }
+
+func TestCLI(t *testing.T) {
+	startTimeout = 2 * time.Second
+	f := filepath.Join(t.TempDir(), "c.yml")
+	_ = os.WriteFile(f, []byte("private_key: "+key+"\nmetrics: 1\n"), 0o644)
+	cases := map[string]struct {
+		args []string
+		want int
+	}{
+		"genkey":       {[]string{"genkey"}, 0},
+		"unknown":      {[]string{"bogus"}, 2},
+		"bad flag":     {[]string{"-nope"}, 2},
+		"health":       {[]string{"-config", f, "health"}, 1},
+		"run bad conf": {[]string{"-config", filepath.Join(t.TempDir(), "missing")}, 1},
+		// No Docker socket here: the agent stops with an error.
+		"run no docker": {[]string{"-config", f}, 1},
+	}
+	for name, c := range cases {
+		if got := cli(c.args); got != c.want {
+			t.Errorf("%s: exit %d, want %d", name, got, c.want)
+		}
+	}
+	r, w, _ := os.Pipe()
+	old := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = old }()
+	_, _ = w.WriteString(key)
+	w.Close()
+	if cli([]string{"pubkey"}) != 0 {
+		t.Fatal("pubkey")
+	}
+}
+
+func TestServeListenErrors(t *testing.T) {
+	f := dockertest.NewFake()
+	defer f.Close()
+	f.Set(dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{"apps": {NetworkID: "n1", IPAddress: "127.0.0.2"}}))
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	busy, _ := net.Listen("tcp", "127.0.0.2:0")
+	defer busy.Close()
+	bp := strconv.Itoa(busy.Addr().(*net.TCPAddr).Port)
+
+	cfg, _ := config.Parse([]byte("private_key: " + key + "\nlisten: " + bp + "\n"))
+	if serve(context.Background(), cfg, log, f.Client(), "self") != 1 {
+		t.Fatal("busy partner port accepted")
+	}
+	cfg, _ = config.Parse([]byte("private_key: " + key + "\nlisten: " + strconv.Itoa(freePort(t)) + "\nmetrics: " + bp + "\n"))
+	if serve(context.Background(), cfg, log, f.Client(), "self") != 1 {
+		t.Fatal("busy metrics port accepted")
+	}
+	cfg, _ = config.Parse([]byte("private_key: " + key + "\nlisten: " + strconv.Itoa(freePort(t)) +
+		"\nmetrics: " + strconv.Itoa(freePort(t)) + "\nimport_network: missing\n"))
+	if serve(context.Background(), cfg, log, f.Client(), "self") != 1 {
+		t.Fatal("import setup error accepted")
+	}
+}

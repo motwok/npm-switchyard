@@ -236,3 +236,43 @@ func TestOpenCancelled(t *testing.T) {
 		return
 	}
 }
+
+// silentExporter never answers: the attaching dialer blocks, the listener times out.
+type silentExporter struct{ release chan struct{} }
+
+func (e silentExporter) Connect(ctx context.Context, _ wire.Target, _ func(string) bool) (net.Conn, metrics.Target, byte) {
+	<-e.release
+	return nil, metrics.Target{}, wire.StatusNoTarget
+}
+
+func (silentExporter) Track(net.Conn, metrics.Target) func() { return func() {} }
+
+func TestStreamTimeouts(t *testing.T) {
+	oldR, oldS := requestWait, statusTimeout
+	requestWait, statusTimeout = 300*time.Millisecond, 300*time.Millisecond
+	defer func() { requestWait, statusTimeout = oldR, oldS }()
+	a, b := pair(t, true, false)
+	ex := silentExporter{make(chan struct{})}
+	defer close(ex.release)
+	a.exp = ex
+
+	// The exporter never answers: the listener gives up waiting for the status.
+	if _, _, err := b.Open(context.Background(), 0, wire.Target{Proto: wire.TCP, Port: 1, Name: "echo"}); err == nil {
+		t.Fatal("no status timeout")
+	}
+
+	// The dialer cannot open stream connections any more: no attach arrives.
+	a.state[0].mu.Lock()
+	a.partners[0].Address = "127.0.0.1:1"
+	ch := a.state[0].spares
+	a.state[0].mu.Unlock()
+	for len(ch) > 0 {
+		(<-ch).Close()
+	}
+	if _, _, err := b.Open(context.Background(), 0, wire.Target{Proto: wire.TCP, Port: 1, Name: "echo"}); err == nil {
+		t.Fatal("no request timeout")
+	}
+	if _, _, err := a.Open(context.Background(), 0, wire.Target{Proto: wire.TCP, Port: 1, Name: "echo"}); err == nil {
+		t.Fatal("dialer opened without a stream connection")
+	}
+}

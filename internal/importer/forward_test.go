@@ -63,3 +63,22 @@ func TestForwarder(t *testing.T) {
 		t.Fatal("all failed must give nil")
 	}
 }
+
+func TestForwarderTCP(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &dns.Server{Listener: l, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, q *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(q)
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = s.ActivateAndServe() }()
+	defer s.Shutdown()
+	q := new(dns.Msg)
+	q.SetQuestion("example.org.", dns.TypeA)
+	if r := NewForwarder([]string{l.Addr().String()}).Exchange(q, true); r == nil || r.Rcode != dns.RcodeSuccess {
+		t.Fatalf("tcp: %v", r)
+	}
+}

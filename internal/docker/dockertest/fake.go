@@ -21,6 +21,7 @@ type Fake struct {
 	Containers map[string]docker.Container // by ID
 	Networks   map[string]docker.Network   // by ID
 	VersionAPI string
+	EventsFail bool // answer the event stream with 500
 	events     chan docker.Event
 }
 
@@ -71,6 +72,10 @@ func NewFake() *Fake {
 		http.Error(w, `{"message":"no such network"}`, http.StatusNotFound)
 	})
 	mux.HandleFunc("GET /"+docker.APIVersion+"/events", func(w http.ResponseWriter, r *http.Request) {
+		if f.EventsFail {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()
 		enc := json.NewEncoder(w)
