@@ -153,7 +153,13 @@ func dnsNames(c docker.Container, _ string, ep docker.Endpoint) []string {
 func (e *Exporter) Run(ctx context.Context) {
 	kick := make(chan struct{}, 1)
 	ask := func() { nudge(kick) }
-	go e.refresher(ctx, kick)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		e.refresher(ctx, kick)
+	}()
+	defer wg.Wait() // Run returns only once the refresher is gone
 	wait := e.backoffMin
 	for ctx.Err() == nil {
 		ask()
