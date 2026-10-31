@@ -146,6 +146,9 @@ func (im *Importer) fillOwnNames(ctx context.Context, dc *docker.Client, self do
 		mine[ep.NetworkID] = strings.ToLower(name)
 	}
 	for _, c := range cs {
+		if full, err := dc.Inspect(ctx, c.ID); err == nil {
+			c = full // the list omits Aliases and DNSNames
+		}
 		for _, ep := range c.NetworkSettings.Networks {
 			nw, ok := mine[ep.NetworkID]
 			if !ok {

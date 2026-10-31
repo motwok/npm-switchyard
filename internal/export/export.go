@@ -77,6 +77,21 @@ func (e *Exporter) Refresh(ctx context.Context) error {
 		if c.ID == self.ID {
 			continue
 		}
+		sharesOne := false
+		for _, ep := range c.NetworkSettings.Networks {
+			if _, ok := shared[ep.NetworkID]; ok {
+				sharesOne = true
+			}
+		}
+		if !sharesOne {
+			continue
+		}
+		// The list omits Aliases and DNSNames; inspect has them.
+		if full, err := e.dc.Inspect(ctx, c.ID); err == nil {
+			c = full
+		} else if !docker.IsNotFound(err) {
+			return err
+		}
 		mt := metrics.Target{
 			Container: c.DisplayName(),
 			Service:   c.Label("com.docker.compose.service"),
