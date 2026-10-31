@@ -16,6 +16,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/motwok/npm-switchyard/internal/config"
 	"github.com/motwok/npm-switchyard/internal/docker"
 	"github.com/motwok/npm-switchyard/internal/docker/dockertest"
 	"github.com/motwok/npm-switchyard/internal/metrics"
@@ -346,4 +347,65 @@ func TestWatchMembers(t *testing.T) {
 	cancel()
 	<-done
 	im.joined(context.Background(), "missing")
+}
+
+func TestSetup(t *testing.T) {
+	f := dockertest.NewFake()
+	defer f.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &config.Config{ImportNetwork: "imp", Listen: 9481, Metrics: 9480, NPMData: t.TempDir()}
+	op := echoOpener{}
+	ctx := context.Background()
+	setNet := func(ipam docker.IPAMConfig) {
+		n := docker.Network{ID: "n-imp", Name: "imp"}
+		n.IPAM.Config = []docker.IPAMConfig{ipam}
+		n.Containers = map[string]struct {
+			Name        string `json:"Name"`
+			IPv4Address string `json:"IPv4Address"`
+		}{"other": {Name: "npm", IPv4Address: "127.0.0.5/8"}}
+		f.Networks["n-imp"] = n
+	}
+	self := func(ip string) {
+		f.Set(dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{"imp": {NetworkID: "n-imp", IPAddress: ip}}))
+	}
+
+	if _, err := Setup(ctx, f.Client(), "self", cfg, op, metrics.New(), log); err == nil {
+		t.Fatal("missing own container accepted")
+	}
+	f.Set(dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{"other": {NetworkID: "x"}}))
+	if _, err := Setup(ctx, f.Client(), "self", cfg, op, metrics.New(), log); err == nil {
+		t.Fatal("agent outside the import network accepted")
+	}
+	self("127.0.0.1")
+	if _, err := Setup(ctx, f.Client(), "self", cfg, op, metrics.New(), log); err == nil {
+		t.Fatal("missing network accepted")
+	}
+	for _, bad := range []docker.IPAMConfig{
+		{Subnet: "fd00::/64"},
+		{Subnet: "127.0.0.0/8"},
+		{Subnet: "127.0.0.0/8", IPRange: "nonsense"},
+	} {
+		setNet(bad)
+		if _, err := Setup(ctx, f.Client(), "self", cfg, op, metrics.New(), log); err == nil {
+			t.Fatalf("accepted %+v", bad)
+		}
+	}
+	setNet(docker.IPAMConfig{Subnet: "127.0.0.0/24", IPRange: "127.0.0.128/25", Gateway: "127.0.0.129",
+		AuxAddress: map[string]string{"dev": "127.0.0.9"}})
+	self("bad-ip")
+	if _, err := Setup(ctx, f.Client(), "self", cfg, op, metrics.New(), log); err == nil {
+		t.Fatal("invalid own IP accepted")
+	}
+	self("127.0.0.77") // on no interface
+	if _, err := Setup(ctx, f.Client(), "self", cfg, op, metrics.New(), log); err == nil {
+		t.Fatal("own IP on no interface accepted")
+	}
+	self("127.0.0.1")
+	im, err := Setup(ctx, f.Client(), "self", cfg, op, metrics.New(), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if im.Own.String() != "127.0.0.1" || im.network != "imp" {
+		t.Fatal(im.Own, im.network)
+	}
 }
