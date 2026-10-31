@@ -1,10 +1,7 @@
 name: Release Drafter
 
 on:
-  push:
-    branches: [master]
-    # Only changes that make a release (same files as the release check in build.yml).
-    paths: ["**.go", go.mod, go.sum, Dockerfile, Dockerfile.windows]
+  # On master the notes are written by the release job in build.yml, only when there is a release.
   # pull_request_target: fork PRs get a read-only token on pull_request; no PR code is checked out
   pull_request_target:
     types: [opened, reopened, synchronize, edited]
@@ -23,16 +20,3 @@ jobs:
       - uses: release-drafter/release-drafter/autolabeler@v7
         with:
           config-name: release-drafter.yml
-
-  update_release_draft:
-    if: github.event_name == 'push'
-    permissions:
-      contents: write
-      pull-requests: read
-    runs-on: ubuntu-latest
-    steps:
-      - uses: release-drafter/release-drafter@v7
-        with:
-          config-name: release-drafter.yml
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
