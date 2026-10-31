@@ -262,8 +262,8 @@ func TestStreamTimeouts(t *testing.T) {
 	}
 
 	// The dialer cannot open stream connections any more: no attach arrives.
+	a.setAddr(0, "127.0.0.1:1")
 	a.state[0].mu.Lock()
-	a.partners[0].Address = "127.0.0.1:1"
 	ch := a.state[0].spares
 	a.state[0].mu.Unlock()
 	for len(ch) > 0 {
@@ -275,4 +275,133 @@ func TestStreamTimeouts(t *testing.T) {
 	if _, _, err := a.Open(context.Background(), 0, wire.Target{Proto: wire.TCP, Port: 1, Name: "echo"}); err == nil {
 		t.Fatal("dialer opened without a stream connection")
 	}
+}
+
+// Incoming stream connections that break off at each step are closed.
+func TestTruncatedStreams(t *testing.T) {
+	a, _ := pair(t, true, false)
+	for _, hdr := range [][]byte{{}, {wire.StreamOpen}, {wire.StreamOpen, 0, 9, 't'}, {wire.StreamAttach, 0}} {
+		c, err := a.dial(context.Background(), 0, wire.KindStream)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = c.Write(hdr)
+		_ = c.CloseWrite()
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, _ = c.Read(make([]byte, 1))
+		c.Close()
+	}
+}
+
+// An authenticated connection of an unknown kind is dropped.
+func TestUnknownKind(t *testing.T) {
+	a, _ := pair(t, true, false)
+	c, err := a.dial(context.Background(), 0, 'X')
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := c.Read(make([]byte, 1)); err == nil {
+		t.Fatal("unknown kind kept open")
+	}
+}
+
+// A dead spare is replaced by one fresh dial; without a reachable partner Open fails.
+func TestDeadSpare(t *testing.T) {
+	a, _ := pair(t, true, false)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		a.state[0].mu.Lock()
+		n := len(a.state[0].spares)
+		a.state[0].mu.Unlock()
+		if n > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	a.state[0].mu.Lock()
+	ch := a.state[0].spares
+	a.state[0].mu.Unlock()
+	sp := <-ch
+	sp.Conn.NetConn().Close() // the TLS layer still looks fine, the socket is gone
+	ch <- sp
+	roundTrip(t, a)
+
+	a.setAddr(0, "127.0.0.1:1")
+	for len(ch) > 0 {
+		sp := <-ch
+		sp.Conn.NetConn().Close()
+		ch <- sp
+		break
+	}
+	_, _, _ = a.Open(context.Background(), 0, wire.Target{Proto: wire.TCP, Port: 1, Name: "echo"})
+}
+
+// The dialer waits for a status that never comes.
+func TestDialerStatusTimeout(t *testing.T) {
+	old := statusTimeout
+	statusTimeout = 300 * time.Millisecond
+	a, b := pair(t, true, false)
+	statusTimeout = old
+	ex := silentExporter{make(chan struct{})}
+	defer close(ex.release)
+	b.exp = ex
+	if _, _, err := a.Open(context.Background(), 0, wire.Target{Proto: wire.TCP, Port: 1, Name: "echo"}); err == nil {
+		t.Fatal("no status timeout")
+	}
+}
+
+// The handshake with something that is not a partner fails, and so does a dial to nowhere.
+func TestDialErrors(t *testing.T) {
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer l.Close()
+	go func() {
+		c, err := l.Accept()
+		if err == nil {
+			c.Close()
+		}
+	}()
+	a, _ := pair(t, true, false)
+	a.setAddr(0, l.Addr().String())
+	if _, err := a.dial(context.Background(), 0, wire.KindStream); err == nil {
+		t.Fatal("handshake with a non-partner succeeded")
+	}
+	a.setAddr(0, "127.0.0.1:1")
+	if _, err := a.dial(context.Background(), 0, wire.KindStream); err == nil {
+		t.Fatal("dial to nowhere succeeded")
+	}
+}
+
+// A reset in the middle of a copy closes both sides.
+func TestPipeReset(t *testing.T) {
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer l.Close()
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		_ = c.(*net.TCPConn).SetLinger(0)
+		c.Close()
+	}()
+	x, _ := net.Dial("tcp", l.Addr().String())
+	cl, sv := net.Pipe()
+	defer cl.Close()
+	done := make(chan struct{})
+	go func() { Pipe(sv, x, func(string, int64) {}); close(done) }()
+	go func() { _, _ = io.Copy(io.Discard, cl) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pipe did not end")
+	}
+}
+
+// setAddr changes where the manager dials partner idx.
+func (m *Manager) setAddr(idx int, a string) {
+	s := m.state[idx]
+	s.mu.Lock()
+	s.addr = a
+	s.mu.Unlock()
 }

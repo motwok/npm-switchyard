@@ -82,3 +82,14 @@ func TestForwarderTCP(t *testing.T) {
 		t.Fatalf("tcp: %v", r)
 	}
 }
+
+func TestForwarderUnreachable(t *testing.T) {
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	dead := pc.LocalAddr().String()
+	pc.Close() // nothing listens there any more
+	q := new(dns.Msg)
+	q.SetQuestion("example.org.", dns.TypeA)
+	if NewForwarder([]string{dead, server(t, dns.RcodeSuccess)}).Exchange(q, false) == nil {
+		t.Fatal("next server not tried")
+	}
+}

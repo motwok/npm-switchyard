@@ -85,3 +85,16 @@ func TestMounted(t *testing.T) {
 		t.Fatal("empty store")
 	}
 }
+
+func TestParseOddInput(t *testing.T) {
+	if got := Parse("proxy_pass x.b.switchyard:99999;\n"); len(got) != 0 {
+		t.Fatal(got)
+	}
+	d := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(d, "nginx", "proxy_host", "dir.conf"), 0o755) // unreadable as a file
+	s := NewStore(d)
+	s.Reload()
+	if len(s.Names()) != 0 {
+		t.Fatal("directory read as config")
+	}
+}

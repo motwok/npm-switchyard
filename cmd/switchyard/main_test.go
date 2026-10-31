@@ -288,3 +288,13 @@ func TestServeListenErrors(t *testing.T) {
 		t.Fatal("import setup error accepted")
 	}
 }
+
+func TestHealthNot200(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+	f := filepath.Join(t.TempDir(), "c.yml")
+	_ = os.WriteFile(f, []byte("private_key: "+key+"\nmetrics: "+strconv.Itoa(srv.Listener.Addr().(*net.TCPAddr).Port)+"\n"), 0o644)
+	if health(f) != 1 {
+		t.Fatal("404 reported healthy")
+	}
+}

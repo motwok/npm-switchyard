@@ -123,10 +123,13 @@ type Local struct {
 	certs    map[string]tls.Certificate // fingerprint of own public key -> certificate
 	global   tls.Certificate
 	byPeer   map[string]int // peer public key -> partner index
+
+	verMin, verMax uint16 // supported protocol versions
 }
 
 func NewLocal(global ed25519.PrivateKey, partners []Partner) (*Local, error) {
-	l := &Local{ID: NewInstanceID(), partners: partners, certs: map[string]tls.Certificate{}, byPeer: map[string]int{}}
+	l := &Local{ID: NewInstanceID(), partners: partners, certs: map[string]tls.Certificate{}, byPeer: map[string]int{},
+		verMin: VersionMin, verMax: VersionMax}
 	var err error
 	if l.global, err = certFor(global); err != nil {
 		return nil, err
@@ -188,16 +191,16 @@ func (l *Local) Dial(raw net.Conn, idx int, kind byte) (*Conn, error) {
 	if err := c.Handshake(); err != nil {
 		return nil, err
 	}
-	if _, err := c.Write(hello{VersionMin, VersionMax, l.ID, kind}.marshal()); err != nil {
+	if _, err := c.Write(hello{l.verMin, l.verMax, l.ID, kind}.marshal()); err != nil {
 		return nil, err
 	}
 	h, err := readHello(c)
 	if err != nil {
 		return nil, err
 	}
-	v, err := Negotiate(VersionMin, VersionMax, h.verMin, h.verMax)
+	v, err := Negotiate(l.verMin, l.verMax, h.verMin, h.verMax)
 	if err != nil {
-		return nil, fmt.Errorf("%w: ours %d-%d, theirs %d-%d", err, VersionMin, VersionMax, h.verMin, h.verMax)
+		return nil, fmt.Errorf("%w: ours %d-%d, theirs %d-%d", err, l.verMin, l.verMax, h.verMin, h.verMax)
 	}
 	return &Conn{Conn: c, Partner: idx, PeerID: h.id, Version: v, Kind: kind, Dialer: true, PeerAddr: raw.RemoteAddr()}, nil
 }
@@ -246,12 +249,12 @@ func (l *Local) Accept(raw net.Conn) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := c.Write(hello{VersionMin, VersionMax, l.ID, h.kind}.marshal()); err != nil {
+	if _, err := c.Write(hello{l.verMin, l.verMax, l.ID, h.kind}.marshal()); err != nil {
 		return nil, err
 	}
-	v, err := Negotiate(VersionMin, VersionMax, h.verMin, h.verMax)
+	v, err := Negotiate(l.verMin, l.verMax, h.verMin, h.verMax)
 	if err != nil {
-		return nil, fmt.Errorf("%w: ours %d-%d, theirs %d-%d", err, VersionMin, VersionMax, h.verMin, h.verMax)
+		return nil, fmt.Errorf("%w: ours %d-%d, theirs %d-%d", err, l.verMin, l.verMax, h.verMin, h.verMax)
 	}
 	return &Conn{Conn: c, Partner: idx, PeerID: h.id, Version: v, Kind: h.kind, PeerAddr: raw.RemoteAddr()}, nil
 }

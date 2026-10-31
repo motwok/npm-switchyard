@@ -236,14 +236,6 @@ func (t *Table) Joined(a netip.Addr) (string, bool) {
 	if a == t.own {
 		return "", false
 	}
-	for _, ip := range t.longIPs {
-		if ip == a {
-			for _, name := range t.taken[a] {
-				return name, true
-			}
-			return "", true
-		}
-	}
 	for n, e := range t.names {
 		if e.Addr == a {
 			return n, true

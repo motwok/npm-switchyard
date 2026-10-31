@@ -56,6 +56,7 @@ type Manager struct {
 type partnerState struct {
 	idx  int
 	name string
+	addr string // dial target; guarded by mu
 
 	mu      sync.Mutex
 	ctrl    *wire.Conn
@@ -70,7 +71,7 @@ func New(local *wire.Local, partners []config.Partner, exp Exporter, met *metric
 	m := &Manager{local: local, partners: partners, exp: exp, met: met, log: log,
 		requestWait: requestWait, statusTimeout: statusTimeout}
 	for i, p := range partners {
-		m.state = append(m.state, &partnerState{idx: i, name: p.Name, pending: map[uint32]chan *wire.Conn{}})
+		m.state = append(m.state, &partnerState{idx: i, name: p.Name, addr: p.Address, pending: map[uint32]chan *wire.Conn{}})
 		met.SetPeerUp(p.Name, false)
 	}
 	return m
@@ -168,7 +169,11 @@ func (m *Manager) dialLoop(ctx context.Context, idx int) {
 
 func (m *Manager) dial(ctx context.Context, idx int, kind byte) (*wire.Conn, error) {
 	d := net.Dialer{Timeout: dialTimeout}
-	raw, err := d.DialContext(ctx, "tcp", m.partners[idx].Address)
+	s := m.state[idx]
+	s.mu.Lock()
+	addr := s.addr
+	s.mu.Unlock()
+	raw, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}

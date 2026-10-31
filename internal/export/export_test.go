@@ -10,6 +10,7 @@ import (
 
 	"github.com/motwok/npm-switchyard/internal/docker"
 	"github.com/motwok/npm-switchyard/internal/docker/dockertest"
+	"github.com/motwok/npm-switchyard/internal/metrics"
 	"github.com/motwok/npm-switchyard/internal/wire"
 )
 
@@ -197,4 +198,32 @@ func TestRefConnCloseWritePlain(t *testing.T) {
 		t.Fatal("plain conn CloseWrite")
 	}
 	c.Close()
+}
+
+func TestRefreshErrors(t *testing.T) {
+	f, e := setup(t)
+	f.FailInspect["web00000000000"] = true
+	if e.Refresh(context.Background()) == nil {
+		t.Fatal("inspect error ignored")
+	}
+	f.FailInspect["web00000000000"] = false
+	f.ListFail = true
+	if e.Refresh(context.Background()) == nil {
+		t.Fatal("list error ignored")
+	}
+	f.ListFail = false
+	f.Remove("self0000000000")
+	if e.Refresh(context.Background()) == nil {
+		t.Fatal("missing own container ignored")
+	}
+	// Run logs refresh errors at start and on events, and keeps going.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { e.Run(ctx); close(done) }()
+	time.Sleep(100 * time.Millisecond)
+	f.Emit(docker.Event{Type: "network", Action: "connect"})
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+	e.Track(&net.TCPConn{}, metrics.Target{})() // not a target connection: nothing to track
 }

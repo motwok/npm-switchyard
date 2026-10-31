@@ -2,6 +2,7 @@ package docker_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -101,4 +102,20 @@ func TestEventsErrors(t *testing.T) {
 	if _, err := dead.Version(context.Background()); err == nil {
 		t.Fatal("dead daemon version")
 	}
+}
+
+//nolint:staticcheck // a nil context is the only way to make the request itself fail
+func TestRequestErrors(t *testing.T) {
+	c := docker.NewWithDialer(func(context.Context) (net.Conn, error) { return nil, io.EOF })
+	if _, err := c.Version(nil); err == nil { //nolint:staticcheck
+		t.Fatal("nil context accepted")
+	}
+	if err := c.Events(nil, func(docker.Event) {}); err == nil { //nolint:staticcheck
+		t.Fatal("nil context accepted")
+	}
+	var s docker.Container
+	if err := json.Unmarshal([]byte(`{"State":5}`), &s); err == nil {
+		t.Fatal("bad state accepted")
+	}
+	_ = docker.New()
 }

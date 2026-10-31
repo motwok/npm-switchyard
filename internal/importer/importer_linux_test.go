@@ -409,3 +409,84 @@ func TestSetup(t *testing.T) {
 		t.Fatal(im.Own, im.network)
 	}
 }
+
+// errOpener fails every stream with an error.
+type errOpener struct{}
+
+func (errOpener) Known(string) bool { return true }
+func (errOpener) Open(context.Context, string, wire.Target) (net.Conn, byte, error) {
+	return nil, 0, io.ErrClosedPipe
+}
+
+func TestOpenErrorsAndRefusedUDP(t *testing.T) {
+	im := newImporter(t)
+	im.open = errOpener{}
+	port := freePort(t)
+	query(im, "x."+strconv.Itoa(port)+".b.switchyard", dns.TypeA)
+	c, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err == nil {
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, _ = c.Read(make([]byte, 1))
+		c.Close()
+	}
+	u, _ := net.Dial("udp", "127.0.0.1:"+strconv.Itoa(port))
+	_, _ = u.Write([]byte("x"))
+	u.Close()
+
+	im2 := newImporter(t) // refused (no error) for UDP
+	p2 := freePort(t)
+	query(im2, "nope."+strconv.Itoa(p2)+".b.switchyard", dns.TypeA)
+	u2, _ := net.Dial("udp", "127.0.0.1:"+strconv.Itoa(p2))
+	_, _ = u2.Write([]byte("x"))
+	time.Sleep(100 * time.Millisecond)
+	u2.Close()
+}
+
+func TestShortNameRangeFull(t *testing.T) {
+	im := newImporter(t)
+	dir := t.TempDir()
+	ph := filepath.Join(dir, "nginx", "proxy_host")
+	_ = os.MkdirAll(ph, 0o755)
+	_ = os.WriteFile(filepath.Join(ph, "1.conf"), []byte("set $server \"s.b.switchyard\";\nset $port 1;\n"), 0o644)
+	im.npm = npmconf.NewStore(dir)
+	empty, _ := NewPool(netip.MustParsePrefix("127.0.1.0/30"), netip.MustParsePrefix("127.0.1.0/30"), nil)
+	im.table = NewTable(empty, im.Own, nil)
+	if r := query(im, "s.b.switchyard", dns.TypeA); r.Rcode != dns.RcodeNameError {
+		t.Fatalf("%v", r)
+	}
+}
+
+func TestListenTwice(t *testing.T) {
+	im := newImporter(t)
+	port := freePort(t)
+	e := &Entry{Name: "x." + strconv.Itoa(port) + ".b.switchyard", Addr: im.Own, Ports: map[int]bool{}}
+	im.mu.Lock()
+	im.listenPorts(e, []int{port})
+	im.listenPorts(e, []int{port}) // already listening: no second listener
+	n := len(im.listeners)
+	im.mu.Unlock()
+	if n != 1 {
+		t.Fatal(n)
+	}
+}
+
+func TestServeAndOwnNames(t *testing.T) {
+	im := newImporter(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ready := make(chan struct{})
+	// Port 53 needs root; as a normal user Serve fails, as root it serves until ctx ends.
+	_ = im.Serve(ctx, ready)
+
+	f := dockertest.NewFake()
+	defer f.Close()
+	f.Set(dockertest.Ctr("c1", "db", nil, map[string]docker.Endpoint{"n": {NetworkID: "n1", DNSNames: []string{"db"}}}))
+	self := dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{"n": {NetworkID: "n1"}})
+	im.ownNet = map[string]bool{}
+	im.fillOwnNames(context.Background(), f.Client(), self)
+	if !im.ownNet["db"] || !im.ownNet["db.n"] {
+		t.Fatal(im.ownNet)
+	}
+	dead := docker.NewWithDialer(func(context.Context) (net.Conn, error) { return nil, io.EOF })
+	im.fillOwnNames(context.Background(), dead, self)
+}

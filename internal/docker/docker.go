@@ -30,12 +30,8 @@ func NewWithDialer(d func(ctx context.Context) (net.Conn, error)) *Client {
 	return &Client{http: &http.Client{Transport: tr}}
 }
 
-func (c *Client) get(ctx context.Context, path string, q url.Values, out any) error {
-	u := "http://docker/" + APIVersion + path
-	if q != nil {
-		u += "?" + q.Encode()
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+func (c *Client) get(ctx context.Context, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/"+APIVersion+path, nil)
 	if err != nil {
 		return err
 	}
@@ -70,7 +66,7 @@ type Version struct {
 
 func (c *Client) Version(ctx context.Context) (Version, error) {
 	var v Version
-	err := c.get(ctx, "/version", nil, &v)
+	err := c.get(ctx, "/version", &v)
 	return v, err
 }
 
@@ -138,14 +134,14 @@ func (c Container) Label(k string) string {
 
 func (c *Client) Inspect(ctx context.Context, id string) (Container, error) {
 	var ct Container
-	err := c.get(ctx, "/containers/"+url.PathEscape(id)+"/json", nil, &ct)
+	err := c.get(ctx, "/containers/"+url.PathEscape(id)+"/json", &ct)
 	return ct, err
 }
 
 // Running lists running containers with their network endpoints.
 func (c *Client) Running(ctx context.Context) ([]Container, error) {
 	var cs []Container
-	err := c.get(ctx, "/containers/json", nil, &cs)
+	err := c.get(ctx, "/containers/json", &cs)
 	return cs, err
 }
 
@@ -171,7 +167,7 @@ type Network struct {
 
 func (c *Client) Network(ctx context.Context, id string) (Network, error) {
 	var n Network
-	err := c.get(ctx, "/networks/"+url.PathEscape(id), nil, &n)
+	err := c.get(ctx, "/networks/"+url.PathEscape(id), &n)
 	return n, err
 }
 

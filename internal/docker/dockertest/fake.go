@@ -17,22 +17,28 @@ import (
 type Fake struct {
 	Server *httptest.Server
 
-	mu         sync.Mutex
-	Containers map[string]docker.Container // by ID
-	Networks   map[string]docker.Network   // by ID
-	VersionAPI string
-	EventsFail bool // answer the event stream with 500
-	events     chan docker.Event
+	mu          sync.Mutex
+	Containers  map[string]docker.Container // by ID
+	Networks    map[string]docker.Network   // by ID
+	VersionAPI  string
+	EventsFail  bool            // answer the event stream with 500
+	ListFail    bool            // answer the container list with 500
+	FailInspect map[string]bool // answer inspect of these IDs with 500
+	events      chan docker.Event
 }
 
 func NewFake() *Fake {
 	f := &Fake{Containers: map[string]docker.Container{}, Networks: map[string]docker.Network{}, VersionAPI: "1.47",
-		events: make(chan docker.Event, 16)}
+		events: make(chan docker.Event, 16), FailInspect: map[string]bool{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /"+docker.APIVersion+"/version", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(docker.Version{APIVersion: f.VersionAPI, Os: "linux"})
 	})
 	mux.HandleFunc("GET /"+docker.APIVersion+"/containers/json", func(w http.ResponseWriter, _ *http.Request) {
+		if f.ListFail {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		var list []map[string]any
@@ -54,6 +60,10 @@ func NewFake() *Fake {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		id := r.PathValue("id")
+		if f.FailInspect[id] {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
 		for _, c := range f.Containers {
 			if c.ID == id || strings.HasPrefix(c.ID, id) || strings.TrimPrefix(c.Name, "/") == id {
 				_ = json.NewEncoder(w).Encode(c)

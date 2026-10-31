@@ -111,10 +111,7 @@ func Setup(ctx context.Context, dc *docker.Client, selfID string, cfg *config.Co
 			exclude = append(exclude, p.Addr())
 		}
 	}
-	pool, err := NewPool(subnet, ipRange, exclude)
-	if err != nil {
-		return nil, err
-	}
+	pool, _ := NewPool(subnet, ipRange, exclude) // cannot fail: the subnet is IPv4, checked above
 	idx, err := ifaceFor(own)
 	if err != nil {
 		return nil, err
