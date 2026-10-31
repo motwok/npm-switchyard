@@ -317,3 +317,34 @@ func (m *Manager) setWrap(f func(net.Conn) net.Conn) {
 	m.wrap = f
 	m.state[0].mu.Unlock()
 }
+
+// failConn fails every write once broken is set.
+type failConn struct {
+	net.Conn
+	broken *atomic.Bool
+}
+
+func (c failConn) Write(b []byte) (int, error) {
+	if c.broken.Load() {
+		return 0, io.ErrClosedPipe
+	}
+	return c.Conn.Write(b)
+}
+
+func TestPingWriteFails(t *testing.T) {
+	var broken atomic.Bool
+	pairSetup = func(a, _ *Manager) {
+		a.pingEvery = 20 * time.Millisecond
+		a.wrap = func(c net.Conn) net.Conn { return failConn{c, &broken} }
+	}
+	a, _ := pairWith(t, true, false, config.Networks{})
+	pairSetup = nil
+	broken.Store(true) // idle control channel: the next ping is the first write
+	deadline := time.Now().Add(10 * time.Second)
+	for a.Up(0) {
+		if time.Now().After(deadline) {
+			t.Fatal("control channel survived a failed ping")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

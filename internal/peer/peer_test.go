@@ -56,6 +56,9 @@ func pair(t *testing.T, aDials, bDials bool) (*Manager, *Manager) {
 }
 
 // pairWith sets the networks b exports to a.
+// pairSetup, if set, runs on both managers before they start.
+var pairSetup func(a, b *Manager)
+
 func pairWith(t *testing.T, aDials, bDials bool, bNets config.Networks) (*Manager, *Manager) {
 	t.Helper()
 	ka := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))
@@ -81,6 +84,9 @@ func pairWith(t *testing.T, aDials, bDials bool, bNets config.Networks) (*Manage
 	t.Cleanup(cancel)
 	cancels.Store(a, cancel)
 	cancels.Store(b, cancel)
+	if pairSetup != nil {
+		pairSetup(a, b)
+	}
 	a.Run(ctx, []net.Listener{la})
 	b.Run(ctx, []net.Listener{lb})
 	deadline := time.Now().Add(10 * time.Second)
