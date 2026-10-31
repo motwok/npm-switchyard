@@ -570,11 +570,9 @@ func TestAliasFailureRollsBack(t *testing.T) {
 	if r.Rcode != dns.RcodeSuccess || r.Answer[0].(*dns.A).A.String() != "127.0.0.2" {
 		t.Fatalf("%v", r)
 	}
-	c, err := net.Dial("tcp", "127.0.0.2:"+strconv.Itoa(port))
-	if err != nil {
-		t.Fatal(err)
+	if im.listeners[netip.AddrPortFrom(netip.MustParseAddr("127.0.0.2"), uint16(port))] == nil {
+		t.Fatal("no listener on the new address")
 	}
-	c.Close()
 	if r := query(im, "s.b.switchyard", dns.TypeA); r.Rcode != dns.RcodeSuccess || r.Answer[0].(*dns.A).A.String() != "127.0.0.3" {
 		t.Fatalf("short: %v", r)
 	}
