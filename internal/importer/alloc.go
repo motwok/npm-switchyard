@@ -229,3 +229,28 @@ func (t *Table) ShortNames() []string {
 }
 
 func (t *Table) Free() int { return t.pool.Free() }
+
+// Joined handles a container that joined the import network with address a later (IMP-8).
+// It returns the name using a as an alias, if any; a free pool address is reserved.
+func (t *Table) Joined(a netip.Addr) (string, bool) {
+	if a == t.own {
+		return "", false
+	}
+	for _, ip := range t.longIPs {
+		if ip == a {
+			for _, name := range t.taken[a] {
+				return name, true
+			}
+			return "", true
+		}
+	}
+	for n, e := range t.names {
+		if e.Addr == a {
+			return n, true
+		}
+	}
+	if t.pool.Contains(a) {
+		t.pool.Reserve(a)
+	}
+	return "", false
+}

@@ -43,6 +43,10 @@ type Importer struct {
 	bits    int
 	ifIndex int
 
+	dc        *docker.Client
+	networkID string
+	network   string
+
 	mu        sync.Mutex
 	table     *Table
 	listeners map[netip.AddrPort]*listenerPair
@@ -123,6 +127,9 @@ func Setup(ctx context.Context, dc *docker.Client, selfID string, cfg *config.Co
 		table:     NewTable(pool, own, []int{53, cfg.Listen, cfg.Metrics}),
 		listeners: map[netip.AddrPort]*listenerPair{},
 		ownNet:    map[string]bool{},
+		dc:        dc,
+		networkID: ep.NetworkID,
+		network:   cfg.ImportNetwork,
 	}
 	servers := ExtServers("/etc/resolv.conf", nw.EnableIPv6)
 	if len(servers) == 0 {
@@ -206,6 +213,7 @@ func (im *Importer) Serve(ctx context.Context, ready chan<- struct{}) error {
 		im.log.Info("NPM files not mounted, short names off")
 	}
 	go im.expireLoop(ctx)
+	go im.watchMembers(ctx)
 
 	select {
 	case <-ctx.Done():

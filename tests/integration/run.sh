@@ -34,6 +34,12 @@ echo "port collision gets a second address"
 a3=$(cli dig +short other.80.b.switchyard)
 [ -n "$a3" ] && [ "$a3" != "$a1" ] || fail "collision: $a1 / $a3"
 
+echo "late member with a fixed address the agent uses is logged"
+late=$(docker run -d --network sy-it_imp --ip "$a3" alpine:3.22 sleep 60)
+sleep 2
+docker rm -f "$late" >/dev/null
+dc logs a | grep -q "address the agent uses" || fail "IMP-8"
+
 echo "target sharing no network is refused"
 if cli curl -fsS --max-time 10 http://localweb.80.b.switchyard/ >/dev/null 2>&1; then fail "refusal"; fi
 
