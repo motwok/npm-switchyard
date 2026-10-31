@@ -11,7 +11,7 @@ import (
 )
 
 // UDPIdle closes a flow after this long without traffic in either direction (TRN-3).
-const UDPIdle = 60 * time.Second
+var UDPIdle = 60 * time.Second
 
 type closeWriter interface{ CloseWrite() error }
 
@@ -53,15 +53,16 @@ type Idle struct {
 func WatchIdle(closers ...io.Closer) *Idle {
 	i := &Idle{stop: make(chan struct{})}
 	i.Touch()
+	limit := UDPIdle
 	go func() {
-		t := time.NewTicker(UDPIdle / 12)
+		t := time.NewTicker(limit / 12)
 		defer t.Stop()
 		for {
 			select {
 			case <-i.stop:
 				return
 			case <-t.C:
-				if time.Since(time.Unix(0, i.last.Load())) >= UDPIdle {
+				if time.Since(time.Unix(0, i.last.Load())) >= limit {
 					for _, c := range closers {
 						c.Close()
 					}

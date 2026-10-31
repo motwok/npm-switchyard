@@ -82,3 +82,13 @@ func TestSource(t *testing.T) {
 		t.Fatal("expected error without any source")
 	}
 }
+
+func TestSpareCount(t *testing.T) {
+	n := 0
+	if (Partner{Spares: &n}).SpareCount() != 0 || (Partner{}).SpareCount() != DefaultSpares {
+		t.Fatal("spares")
+	}
+	if !ValidLabel("a-b") || ValidLabel("-a") || ValidLabel("") {
+		t.Fatal("labels")
+	}
+}

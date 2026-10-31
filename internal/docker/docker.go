@@ -20,9 +20,12 @@ type Client struct {
 	http *http.Client
 }
 
-func New() *Client {
+func New() *Client { return NewWithDialer(dial) }
+
+// NewWithDialer uses d to reach the API, e.g. a test server.
+func NewWithDialer(d func(ctx context.Context) (net.Conn, error)) *Client {
 	tr := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return dial(ctx) },
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return d(ctx) },
 	}
 	return &Client{http: &http.Client{Transport: tr}}
 }

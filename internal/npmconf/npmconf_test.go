@@ -74,3 +74,14 @@ func TestStore(t *testing.T) {
 		t.Fatalf("short names %v", n)
 	}
 }
+
+func TestMounted(t *testing.T) {
+	d := t.TempDir()
+	if !NewStore(d).Mounted() || NewStore(filepath.Join(d, "missing")).Mounted() {
+		t.Fatal("Mounted")
+	}
+	s := NewStore(d) // mounted but NPM has not created its directories yet
+	if s.Available() || s.Ports("x.b.switchyard") != nil {
+		t.Fatal("empty store")
+	}
+}

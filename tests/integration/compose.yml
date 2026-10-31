@@ -15,6 +15,7 @@ services:
   b:
     image: ${IMAGE}
     environment:
+      GOCOVERDIR: /cover
       SWITCHYARD_CONFIG: |
         log_level: debug
         private_key: "LLS0gQNA3cdq5h3gg1g/pqIrqUdEdkGu7dJIDQehz10="
@@ -22,6 +23,7 @@ services:
           - name: a
             public_key: "RINyVq7yQFyJwxKem6pabaa/HaYF2tYO1KSiaZJS5b0="
     volumes:
+      - ${COVERDIR:?set COVERDIR}:/cover
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [link, tgt]
 
@@ -29,6 +31,7 @@ services:
     image: ${IMAGE}
     cap_add: [NET_ADMIN]
     environment:
+      GOCOVERDIR: /cover
       SWITCHYARD_CONFIG: |
         log_level: debug
         import_network: sy-it_imp
@@ -38,6 +41,7 @@ services:
             address: b:9481
             public_key: "XRX+eTqjLBXPs4Sob4ad2h6/ltChA+LOshAdgGTPbIg="
     volumes:
+      - ${COVERDIR:?set COVERDIR}:/cover
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       imp:

@@ -3,6 +3,9 @@
 set -eu
 cd "$(dirname "$0")"
 export IMAGE="${IMAGE:?set IMAGE}"
+# Coverage of the instrumented image (COVER=1) lands here.
+export COVERDIR="${COVERDIR:-$(mktemp -d)}"
+mkdir -p "$COVERDIR" && chmod 777 "$COVERDIR"
 dc() { docker compose -f compose.yml "$@"; }
 fail() { echo "FAIL: $*"; dc logs a npm; dc down -v >/dev/null 2>&1; exit 1; }
 
@@ -51,4 +54,5 @@ retry 60 late.example || fail "runtime resolution"
 
 dc down -v >/dev/null
 rm -f coredns/db.test
+chmod -R a+rX "$COVERDIR"
 echo PASS

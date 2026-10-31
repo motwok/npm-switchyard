@@ -1,0 +1,171 @@
+package peer
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"net"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/motwok/npm-switchyard/internal/config"
+	"github.com/motwok/npm-switchyard/internal/metrics"
+	"github.com/motwok/npm-switchyard/internal/wire"
+)
+
+func TestNotConnected(t *testing.T) {
+	m := New(nil, []config.Partner{{Name: "x"}}, echoExporter{}, metrics.New(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, _, err := m.Open(context.Background(), 0, wire.Target{Name: "echo"}); err != ErrNotConnected {
+		t.Fatal(err)
+	}
+	if m.Up(0) {
+		t.Fatal("up without channel")
+	}
+	if i, ok := m.Index("x"); !ok || i != 0 {
+		t.Fatal("index")
+	}
+	if _, ok := m.Index("y"); ok {
+		t.Fatal("unknown index")
+	}
+}
+
+// udpExporter connects "udp" to a local UDP echo.
+type udpExporter struct{ addr string }
+
+func (e udpExporter) Connect(ctx context.Context, t wire.Target, _ func(string) bool) (net.Conn, metrics.Target, byte) {
+	c, err := net.Dial("udp", e.addr)
+	if err != nil {
+		return nil, metrics.Target{}, wire.StatusUnreachable
+	}
+	return c, metrics.Target{Container: "u"}, wire.StatusOK
+}
+
+func (udpExporter) Track(net.Conn, metrics.Target) func() { return func() {} }
+
+func udpEcho(t *testing.T) string {
+	t.Helper()
+	u, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { u.Close() })
+	go func() {
+		b := make([]byte, 2048)
+		for {
+			n, a, err := u.ReadFrom(b)
+			if err != nil {
+				return
+			}
+			_, _ = u.WriteTo(b[:n], a)
+		}
+	}()
+	return u.LocalAddr().String()
+}
+
+func TestUDPStream(t *testing.T) {
+	a, b := pair(t, true, false)
+	exp := udpExporter{udpEcho(t)}
+	a.exp, b.exp = exp, exp
+	for _, m := range []*Manager{a, b} { // direct open and request/attach
+		c, st, err := m.Open(context.Background(), 0, wire.Target{Proto: wire.UDP, Port: 1, Name: "u"})
+		if err != nil || st != wire.StatusOK {
+			t.Fatal(err, st)
+		}
+		if err := wire.WriteDatagram(c, []byte("ping")); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 16)
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, err := wire.ReadDatagram(c, buf)
+		if err != nil || string(buf[:n]) != "ping" {
+			t.Fatal(err, string(buf[:n]))
+		}
+		c.Close()
+	}
+}
+
+func TestMetricsAfterStreams(t *testing.T) {
+	a, b := pair(t, true, false)
+	roundTrip(t, a)
+	time.Sleep(200 * time.Millisecond)
+	var sb strings.Builder
+	_ = b.met.Write(&sb)
+	if !strings.Contains(sb.String(), `switchyard_streams_total{peer="a",result="ok",container="echo"} 1`) ||
+		!strings.Contains(sb.String(), `switchyard_peer_up{peer="a"} 1`) {
+		t.Fatal(sb.String())
+	}
+}
+
+func TestReconnect(t *testing.T) {
+	a, b := pair(t, true, false)
+	a.state[0].mu.Lock()
+	c := a.state[0].ctrl
+	a.state[0].mu.Unlock()
+	c.Close() // dialer redials after the channel drops
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		a.state[0].mu.Lock()
+		again := a.state[0].ctrl != nil && a.state[0].ctrl != c
+		a.state[0].mu.Unlock()
+		if again && b.Up(0) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no reconnect")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	roundTrip(t, a)
+}
+
+func TestIdleClosesFlow(t *testing.T) {
+	old := UDPIdle
+	UDPIdle = 120 * time.Millisecond
+	defer func() { UDPIdle = old }()
+	a, b := net.Pipe()
+	defer b.Close()
+	w := WatchIdle(a)
+	defer w.Stop()
+	_ = a.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := a.Read(make([]byte, 1)); err == nil {
+		t.Fatal("idle flow not closed")
+	}
+	w.Stop() // idempotent
+}
+
+func TestPipeHalfClose(t *testing.T) {
+	l, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer l.Close()
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(c, c)
+		c.Close()
+	}()
+	x, _ := net.Dial("tcp", l.Addr().String())
+	cl, sv := net.Pipe()
+	var in, out int64
+	done := make(chan struct{})
+	go func() {
+		Pipe(sv, x, func(dir string, n int64) {
+			if dir == "in" {
+				in += n
+			} else {
+				out += n
+			}
+		})
+		close(done)
+	}()
+	_, _ = cl.Write([]byte("abc"))
+	b := make([]byte, 3)
+	_, _ = io.ReadFull(cl, b)
+	cl.Close()
+	<-done
+	if string(b) != "abc" || in != 3 || out != 3 {
+		t.Fatal(string(b), in, out)
+	}
+}

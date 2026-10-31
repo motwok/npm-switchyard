@@ -25,7 +25,15 @@ jobs:
           [ -z "$out" ] || { echo "$out"; exit 1; }
       - run: go vet ./...
       - run: GOOS=windows go vet ./...
-      - run: go test -race ./...
+      - name: Test
+        run: |
+          mkdir -p "$PWD/cover-unit"
+          pkgs=$(go list ./... | grep -v /dockertest | paste -sd, -)  # test helpers are not product code
+          go test -race -covermode=atomic -coverpkg="$pkgs" -cover ./... -args -test.gocoverdir="$PWD/cover-unit"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cover-unit
+          path: cover-unit
       - name: Cross build
         run: |
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/switchyard
@@ -46,9 +54,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build test image
-        run: docker build -t switchyard:test .
+        run: docker build --build-arg COVER=1 -t switchyard:test .
       - name: Integration test
-        run: IMAGE=switchyard:test sh tests/integration/run.sh
+        run: IMAGE=switchyard:test COVERDIR="$PWD/cover-integration" sh tests/integration/run.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: cover-integration-${{ matrix.arch }}
+          path: cover-integration
+          if-no-files-found: ignore
 
   npm:
     name: NPM integration
@@ -56,9 +70,48 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build test image
-        run: docker build -t switchyard:test .
+        run: docker build --build-arg COVER=1 -t switchyard:test .
       - name: NPM integration test
-        run: IMAGE=switchyard:test sh tests/npm/run.sh
+        run: IMAGE=switchyard:test COVERDIR="$PWD/cover-npm" sh tests/npm/run.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: cover-npm
+          path: cover-npm
+          if-no-files-found: ignore
+
+  coverage:
+    name: Coverage
+    needs: [unit, integration, npm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cover-*
+          path: cover
+      - name: Report
+        run: |
+          dirs=$(find cover -mindepth 1 -maxdepth 1 -type d | paste -sd, -)
+          go tool covdata textfmt -i="$dirs" -o cover.txt
+          go tool cover -html=cover.txt -o coverage.html
+          {
+            echo "## Coverage (unit + integration)"
+            echo '```'
+            go tool covdata percent -i="$dirs"
+            go tool cover -func=cover.txt | tail -1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          go tool cover -func=cover.txt | tail -1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: |
+            cover.txt
+            coverage.html
 
   windows:
     name: Windows (${{ matrix.os }})

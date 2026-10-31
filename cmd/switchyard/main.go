@@ -116,8 +116,11 @@ func run(path string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	return serve(ctx, cfg, log, docker.New(), docker.SelfID())
+}
 
-	dc := docker.New()
+// serve runs the agent until ctx ends.
+func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, dc *docker.Client, selfID string) int {
 	v, err := dc.Version(ctx)
 	if err != nil {
 		log.Error("docker api", "err", err)
@@ -127,7 +130,6 @@ func run(path string) int {
 		log.Error("docker api too old", "found", v.APIVersion, "need", "1.44")
 		return 1
 	}
-	selfID := docker.SelfID()
 	self, err := dc.Inspect(ctx, selfID)
 	if err != nil {
 		log.Error("inspect own container", "id", selfID, "err", err)
