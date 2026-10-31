@@ -63,5 +63,5 @@ sleep 1
 if cli curl -fsS --max-time 10 http://web.80.b.switchyard/ >/dev/null 2>&1; then fail "opt-out"; fi
 
 dc down -v >/dev/null
-chmod -R a+rX "$COVERDIR"
+chmod -R a+rX "$COVERDIR" 2>/dev/null || true  # files belong to root; Go writes them readable
 echo PASS

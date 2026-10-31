@@ -442,7 +442,7 @@ func (im *Importer) serveTCP(c net.Conn, n names.Name, port int) {
 	ctx := context.Background()
 	s, st, err := im.open.Open(ctx, n.Partner, im.target(n, port, wire.TCP))
 	if err != nil || st != wire.StatusOK {
-		if err == nil {
+		if s != nil {
 			s.Close()
 		}
 		im.reset(c)
@@ -494,7 +494,7 @@ func (im *Importer) serveUDP(u *net.UDPConn, n names.Name, port int) {
 		if f == nil {
 			s, st, err := im.open.Open(context.Background(), n.Partner, im.target(n, port, wire.UDP))
 			if err != nil || st != wire.StatusOK {
-				if err == nil {
+				if s != nil {
 					s.Close()
 				}
 				continue

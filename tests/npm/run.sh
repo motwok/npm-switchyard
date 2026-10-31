@@ -54,5 +54,5 @@ retry 60 late.example || fail "runtime resolution"
 
 dc down -v >/dev/null
 rm -f coredns/db.test
-chmod -R a+rX "$COVERDIR"
+chmod -R a+rX "$COVERDIR" 2>/dev/null || true  # files belong to root; Go writes them readable
 echo PASS
