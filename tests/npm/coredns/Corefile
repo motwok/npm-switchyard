@@ -1,0 +1,8 @@
+test:53 {
+    file /etc/coredns/db.test {
+        reload 1s
+    }
+}
+.:53 {
+    forward . 1.1.1.1 8.8.8.8
+}

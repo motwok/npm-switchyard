@@ -196,7 +196,7 @@ func (im *Importer) Serve(ctx context.Context, ready chan<- struct{}) error {
 	go func() { errc <- tcp.ListenAndServe() }()
 	go func() { started.Wait(); close(ready) }()
 
-	if im.npm.Available() {
+	if im.npm.Mounted() {
 		im.npm.Reload()
 		go im.watchNPM(ctx)
 	} else {
@@ -327,7 +327,7 @@ func (im *Importer) resolve(qn string) (*Entry, bool) {
 	key := n.String()
 	if n.Short() {
 		ports := im.npm.Ports(key)
-		if ports == nil && im.npm.Available() {
+		if ports == nil && im.npm.Mounted() {
 			im.npm.Reload() // NAM-6: nginx -t may be ahead of inotify
 			ports = im.npm.Ports(key)
 		}

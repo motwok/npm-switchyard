@@ -49,6 +49,16 @@ jobs:
       - name: Integration test
         run: IMAGE=switchyard:test sh tests/integration/run.sh
 
+  npm:
+    name: NPM integration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build test image
+        run: docker build -t switchyard:test .
+      - name: NPM integration test
+        run: IMAGE=switchyard:test sh tests/npm/run.sh
+
   windows:
     name: Windows (${{ matrix.os }})
     strategy:
@@ -86,7 +96,7 @@ jobs:
   release:
     name: Release
     if: github.event_name == 'push'
-    needs: [unit, integration, windows]
+    needs: [unit, integration, npm, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -52,14 +52,22 @@ func Parse(content string) map[string]map[int]bool {
 
 // Store holds the forward hosts of all active NPM files.
 type Store struct {
-	dir string
+	root string
+	dir  string
 
 	mu    sync.Mutex
 	hosts map[string]map[int]bool
 }
 
 func NewStore(npmData string) *Store {
-	return &Store{dir: filepath.Join(npmData, "nginx"), hosts: map[string]map[int]bool{}}
+	return &Store{root: npmData, dir: filepath.Join(npmData, "nginx"), hosts: map[string]map[int]bool{}}
+}
+
+// Mounted reports whether npm_data exists; NPM creates its subdirectories on first start,
+// possibly after the agent (NPM-1).
+func (s *Store) Mounted() bool {
+	fi, err := os.Stat(s.root)
+	return err == nil && fi.IsDir()
 }
 
 func (s *Store) Dirs() []string {

@@ -1,0 +1,88 @@
+# NPM integration test (TST-3): real NPM image, short names from NPM's files, runtime DNS.
+name: sy-npm
+
+networks:
+  imp:
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
+          ip_range: 172.29.0.128/25
+  link:
+    ipam:
+      config:
+        - subnet: 172.30.1.0/24
+  tgt: {}
+
+volumes:
+  npmdata: {}
+
+services:
+  coredns:
+    image: coredns/coredns:1.11.3
+    command: ["-conf", "/etc/coredns/Corefile"]
+    volumes:
+      - ./coredns:/etc/coredns
+    networks:
+      link:
+        ipv4_address: 172.30.1.53
+
+  b:
+    image: ${IMAGE}
+    environment:
+      SWITCHYARD_CONFIG: |
+        log_level: debug
+        partners:
+          - name: b2a
+            psk: "dGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXk="
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [link, tgt]
+
+  a:
+    image: ${IMAGE}
+    cap_add: [NET_ADMIN]
+    dns: [172.30.1.53]
+    environment:
+      SWITCHYARD_CONFIG: |
+        log_level: debug
+        import_network: sy-npm_imp
+        partners:
+          - name: b
+            address: b:9481
+            psk: "dGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXk="
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - npmdata:/npm:ro
+    networks:
+      imp:
+        ipv4_address: 172.29.0.2
+      link: {}
+    depends_on: [coredns]
+
+  web:
+    image: traefik/whoami:v1.11
+    networks: [tgt]
+
+  # Reached by NPM directly once late.test resolves.
+  lateweb:
+    image: traefik/whoami:v1.11
+    networks:
+      imp:
+        ipv4_address: 172.29.0.200
+
+  npm:
+    image: jc21/nginx-proxy-manager:latest
+    environment:
+      INITIAL_ADMIN_EMAIL: admin@example.com
+      INITIAL_ADMIN_PASSWORD: test-password-123
+    dns: [172.29.0.2]
+    ports:
+      - "127.0.0.1:8080:80"
+      - "127.0.0.1:8081:81"
+    volumes:
+      - npmdata:/data
+    networks: [imp]
+    depends_on:
+      a:
+        condition: service_healthy
+        restart: true

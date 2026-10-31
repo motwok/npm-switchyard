@@ -1,0 +1,4 @@
+$ORIGIN test.
+@ 5 IN SOA ns.test. hostmaster.test. SERIAL 60 60 600 5
+@ 5 IN NS ns.test.
+ns 5 IN A 172.30.1.53
