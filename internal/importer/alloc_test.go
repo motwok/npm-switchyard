@@ -100,6 +100,26 @@ func TestShortOwnIPAndQuarantine(t *testing.T) {
 	}
 }
 
+func TestJoined(t *testing.T) {
+	p, own := pool(t)
+	tb := NewTable(p, own, nil)
+	e, _, _, _ := tb.Short("n.hb.switchyard", []int{443})
+	if name, conflict := tb.Joined(e.Addr); !conflict || name != "n.hb.switchyard" {
+		t.Fatalf("conflict not found: %q %v", name, conflict)
+	}
+	free := tb.Free()
+	late := netip.MustParseAddr("172.30.0.100")
+	if _, conflict := tb.Joined(late); conflict || tb.Free() != free-1 {
+		t.Fatal("free address of a late member not reserved")
+	}
+	if x, _, _, _ := tb.Short("m.hb.switchyard", []int{80}); x.Addr == late {
+		t.Fatal("late member's address handed out")
+	}
+	if _, conflict := tb.Joined(netip.MustParseAddr("172.30.0.200")); conflict {
+		t.Fatal("ip_range address reported")
+	}
+}
+
 func TestFull(t *testing.T) {
 	own := netip.MustParseAddr("10.0.0.2")
 	p, _ := NewPool(netip.MustParsePrefix("10.0.0.0/29"), netip.MustParsePrefix("10.0.0.4/30"),
