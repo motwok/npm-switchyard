@@ -23,7 +23,7 @@ for that Windows version any more.
 
 | Workflow | File | Trigger | What it does |
 |---|---|---|---|
-| **Build** | `build.yml` | PR to `master`, push to `master`, manual | Builds all variants and runs the tests. On a push to `master` that changed the image, or when started by hand, it publishes the release `vX.Y.Z` and pushes `:X.Y.Z` and `:latest` as one manifest list (Windows entries with `os.version`). |
+| **Build** | `build.yml` | PR to `master`, push to `master`, manual | Builds all variants and runs the tests. On a push to `master` that changed the image, or when started by hand, it pushes `:X.Y.Z` as one manifest list (Windows entries with `os.version`), smoke-tests the pushed image on every platform GitHub has a runner for, and only then publishes the release `vX.Y.Z` and moves `:latest`. |
 | **Release Drafter** | `release-drafter.yml` | PR events | Labels pull requests from their Conventional Commit titles. The release notes are written by the release job in **Build**, only when there is a release. |
 | **Dependabot** | `.github/dependabot.yml` | Dependabot schedule | Opens PRs for dependencies and the GitHub Actions used; they are merged automatically once the build is green. |
 
@@ -35,13 +35,16 @@ flowchart LR
   D[Dependabot PR, auto-merged when green] --> M
   M --> C{image-relevant files<br/>changed since last release?<br/>tests excluded}
   C -- "no (docs, CI, tests)" --> Q[no release,<br/>listed in the next one]
-  C -- yes --> B[Build workflow<br/>all variants]
-  B --> T{smoke test:<br/>image starts,<br/>/metrics answers}
-  T -- ok --> R[publish release vX.Y.Z]
-  R --> G["push :X.Y.Z and :latest<br/>as one manifest list"]
-  T -- fails --> N[no release, nothing published,<br/>GitHub notifies the maintainer]
-  G --> P[deployments pull :latest]
+  C -- yes --> B[Build workflow<br/>all variants, tests, coverage]
+  B --> G["push :X.Y.Z<br/>as one manifest list"]
+  G --> T{"smoke test of the pushed image:<br/>pulled, starts, /metrics answers<br/>(linux/amd64, linux/arm64,<br/>ltsc2022, ltsc2025)"}
+  T -- ok --> R[publish release vX.Y.Z,<br/>move :latest]
+  T -- fails --> N[no release, :latest unchanged,<br/>GitHub notifies the maintainer]
+  R --> P[deployments pull :latest]
 ```
+
+A failed smoke test leaves the `:X.Y.Z` tags in the registry as a diagnostic; `:latest` never points to
+them, and the next attempt at the same version overwrites them.
 
 ## Version numbers
 

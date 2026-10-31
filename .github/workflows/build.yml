@@ -179,14 +179,17 @@ jobs:
           exit 1
 
   release:
-    name: Release
+    name: Release images
     if: github.event_name != 'pull_request'
-    needs: [unit, integration, npm, windows]
+    needs: [unit, unit-windows, integration, npm, windows, coverage]
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
       pull-requests: read
+    outputs:
+      release: ${{ steps.changed.outputs.release }}
+      version: ${{ steps.drafter.outputs.resolved_version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -202,13 +205,14 @@ jobs:
             echo "release=false" >> "$GITHUB_OUTPUT"
             echo "No image-relevant change since $last, no release." >> "$GITHUB_STEP_SUMMARY"
           fi
-      - name: Publish release
+      # The draft gives the version; it is published only after the pushed images passed the smoke test.
+      - name: Draft release
         id: drafter
         if: steps.changed.outputs.release == 'true'
         uses: release-drafter/release-drafter@v7
         with:
           config-name: release-drafter.yml
-          publish: true
+          publish: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-go@v7
@@ -247,7 +251,8 @@ jobs:
               --provenance=false --sbom=false --push -t "$IMG:$V-windows-$os" .
           done
           # The index is written through the registry API: Docker on Windows picks the variant
-          # by os.version, which buildx and imagetools do not set.
+          # by os.version, which buildx and imagetools do not set. Only the version tag here;
+          # :latest follows once the smoke tests passed.
           api=https://ghcr.io/v2/motwok/npm-switchyard
           tok=$(curl -fsS -u "${{ github.actor }}:$GH_TOKEN" \
             "https://ghcr.io/token?scope=repository:motwok/npm-switchyard:pull,push" | jq -r .token)
@@ -268,7 +273,112 @@ jobs:
           done
           index=$(jq -nc --arg mt "$IDX" --argjson m "$entries" '{schemaVersion: 2, mediaType: $mt, manifests: $m}')
           echo "$index" | jq .
-          for tag in "$V" latest; do
-            printf %s "$index" | curl -fsS -X PUT -H "Authorization: Bearer $tok" -H "Content-Type: $IDX" \
-              --data-binary @- "$api/manifests/$tag"
+          printf %s "$index" | curl -fsS -X PUT -H "Authorization: Bearer $tok" -H "Content-Type: $IDX" \
+            --data-binary @- "$api/manifests/$V"
+
+  # TST-5: the pushed images, pulled from the registry, must start and answer /metrics.
+  smoke-linux:
+    name: Smoke (linux/${{ matrix.arch }})
+    needs: release
+    if: needs.release.outputs.release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      packages: read
+    steps:
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pushed image starts and answers /metrics
+        env:
+          IMG: ghcr.io/motwok/npm-switchyard:${{ needs.release.outputs.version }}
+        run: |
+          docker run -d --name sy -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -e SWITCHYARD_CONFIG='{log_level: debug, private_key: "LLS0gQNA3cdq5h3gg1g/pqIrqUdEdkGu7dJIDQehz10="}' "$IMG"
+          for i in $(seq 1 30); do
+            if docker exec sy /switchyard health; then docker logs sy; exit 0; fi
+            sleep 2
           done
+          docker logs sy
+          exit 1
+
+  smoke-windows:
+    name: Smoke (windows/${{ matrix.os }})
+    needs: release
+    if: needs.release.outputs.release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            os: ltsc2022
+          - runner: windows-2025
+            os: ltsc2025
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      packages: read
+    steps:
+      - name: Docker engine
+        shell: pwsh
+        run: |
+          if (Get-Service docker -ErrorAction SilentlyContinue) { Start-Service docker }
+          docker version
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pushed image starts and answers /metrics
+        shell: bash
+        env:
+          IMG: ghcr.io/motwok/npm-switchyard:${{ needs.release.outputs.version }}
+        run: |
+          docker run -d --name sy --isolation process \
+            --mount 'type=npipe,src=\\.\pipe\docker_engine,dst=\\.\pipe\docker_engine' \
+            -e SWITCHYARD_CONFIG='{log_level: debug, private_key: "LLS0gQNA3cdq5h3gg1g/pqIrqUdEdkGu7dJIDQehz10="}' "$IMG"
+          for i in $(seq 1 30); do
+            if docker exec sy 'C:\switchyard.exe' health; then docker logs sy; exit 0; fi
+            sleep 2
+          done
+          docker logs sy
+          exit 1
+
+  publish:
+    name: Publish release
+    needs: [release, smoke-linux, smoke-windows]
+    if: needs.release.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: read
+    steps:
+      - name: Tag :latest
+        env:
+          V: ${{ needs.release.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          api=https://ghcr.io/v2/motwok/npm-switchyard
+          tok=$(curl -fsS -u "${{ github.actor }}:$GH_TOKEN" \
+            "https://ghcr.io/token?scope=repository:motwok/npm-switchyard:pull,push" | jq -r .token)
+          IDX=application/vnd.oci.image.index.v1+json
+          curl -fsSL -H "Authorization: Bearer $tok" -H "Accept: $IDX" "$api/manifests/$V" > index.json
+          curl -fsS -X PUT -H "Authorization: Bearer $tok" -H "Content-Type: $IDX" \
+            --data-binary @index.json "$api/manifests/latest"
+      - name: Publish release
+        uses: release-drafter/release-drafter@v7
+        with:
+          config-name: release-drafter.yml
+          version: ${{ needs.release.outputs.version }}
+          publish: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

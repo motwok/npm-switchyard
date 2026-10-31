@@ -45,9 +45,11 @@ dc logs a | grep -q "address the agent uses" || fail "IMP-8"
 
 echo "target sharing no network is refused"
 if cli curl -fsS --max-time 10 http://localweb.80.b.switchyard/ >/dev/null 2>&1; then fail "refusal"; fi
+bm() { cli curl -fsS http://b:9480/metrics; }  # the exporter's view, over the link network
+bm | grep -q 'switchyard_streams_total{peer="a",result="refused"} ' || fail "refusal not counted by b"
 
 echo "other names are forwarded"
-cli dig +short example.com | grep -q . || fail "forwarding"
+cli dig +tries=2 +time=3 example.com | grep -q "status: NOERROR" || fail "forwarding"
 
 echo "UDP"
 out=$(cli sh -c 'echo ping | socat -t2 - UDP4:udpecho.9999.b.switchyard:9999')
@@ -58,8 +60,13 @@ cli curl -fsS http://172.28.0.2:9480/metrics | grep -q 'switchyard_peer_up{peer=
 dc exec -T b /switchyard health || fail "health b"
 
 echo "opt-out closes and refuses"
+active='switchyard_streams_active{peer="a",container="sy-it-web-1",service="web",stack="sy-it"} 1'
+cli sh -c 'nohup sh -c "sleep 60 | socat - TCP:web.80.b.switchyard:80" >/dev/null 2>&1 &'
+sleep 2
+bm | grep -q "$active" || fail "open stream not counted"
 docker network disconnect sy-it_tgt "$(dc ps -q web)"
-sleep 1
+sleep 2
+if bm | grep -q 'switchyard_streams_active{peer="a"'; then fail "stream not closed on opt-out"; fi
 if cli curl -fsS --max-time 10 http://web.80.b.switchyard/ >/dev/null 2>&1; then fail "opt-out"; fi
 
 dc down -v >/dev/null
