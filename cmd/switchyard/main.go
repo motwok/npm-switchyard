@@ -172,7 +172,7 @@ func run(path string) int {
 	ready := make(chan struct{})
 	errc := make(chan error, 2)
 	if cfg.ImportNetwork != "" {
-		im, err := importer.Setup(ctx, dc, self.ID, cfg, &opener{mgr: mgr, exp: exp, met: met}, met, log)
+		im, err := importer.Setup(ctx, dc, self.ID, cfg, &opener{mgr: mgr, exp: exp, met: met, local: cfg.LocalNetworks}, met, log)
 		if err != nil {
 			log.Error("import", "err", err)
 			return 1
@@ -241,9 +241,10 @@ func apiAtLeast(v string, major, minor int) bool {
 
 // opener routes import streams to partners or, for "local", to the own exporter (NAM-7).
 type opener struct {
-	mgr *peer.Manager
-	exp *export.Exporter
-	met *metrics.Registry
+	mgr   *peer.Manager
+	exp   *export.Exporter
+	met   *metrics.Registry
+	local config.Networks
 }
 
 func (o *opener) Known(p string) bool {
@@ -262,7 +263,7 @@ func (o *opener) Open(ctx context.Context, p string, t wire.Target) (net.Conn, b
 		}
 		return o.mgr.Open(ctx, idx, t)
 	}
-	c, mt, st := o.exp.Connect(ctx, t)
+	c, mt, st := o.exp.Connect(ctx, t, o.local.Allows)
 	if st != wire.StatusOK {
 		o.met.StreamResult(p, "refused", mt)
 		return nil, st, nil

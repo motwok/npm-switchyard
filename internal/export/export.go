@@ -177,10 +177,15 @@ func (e *Exporter) Run(ctx context.Context) {
 	}
 }
 
-// Connect implements peer.Exporter (EXP-1..4).
-func (e *Exporter) Connect(ctx context.Context, t wire.Target) (net.Conn, metrics.Target, byte) {
+// Connect implements peer.Exporter (EXP-1..4); allow limits the networks for this partner.
+func (e *Exporter) Connect(ctx context.Context, t wire.Target, allow func(network string) bool) (net.Conn, metrics.Target, byte) {
 	e.mu.Lock()
-	cands := append([]ref(nil), e.targets[strings.ToLower(t.Name)]...)
+	var cands []ref
+	for _, r := range e.targets[strings.ToLower(t.Name)] {
+		if allow(r.network) {
+			cands = append(cands, r)
+		}
+	}
 	e.mu.Unlock()
 	if len(cands) == 0 {
 		return nil, metrics.Target{}, wire.StatusNoTarget

@@ -31,7 +31,7 @@ var ErrNotConnected = errors.New("partner not connected")
 
 // Exporter resolves and connects a stream target on this host (spec 10).
 type Exporter interface {
-	Connect(ctx context.Context, t wire.Target) (net.Conn, metrics.Target, byte)
+	Connect(ctx context.Context, t wire.Target, allow func(network string) bool) (net.Conn, metrics.Target, byte)
 	Track(c net.Conn, mt metrics.Target) func()
 }
 
@@ -455,7 +455,7 @@ func (m *Manager) serveStream(ctx context.Context, s *partnerState, c *wire.Conn
 
 // export connects the local target and pipes it to the partner stream c.
 func (m *Manager) export(ctx context.Context, s *partnerState, c *wire.Conn, t wire.Target) {
-	target, mt, st := m.exp.Connect(ctx, t)
+	target, mt, st := m.exp.Connect(ctx, t, m.partners[s.idx].Networks.Allows)
 	_ = c.SetWriteDeadline(time.Now().Add(statusTimeout))
 	if _, err := c.Write([]byte{st}); err != nil || st != wire.StatusOK {
 		result := "refused"
