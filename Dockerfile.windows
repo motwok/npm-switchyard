@@ -1,0 +1,6 @@
+ARG OSVERSION=ltsc2022
+FROM mcr.microsoft.com/windows/nanoserver:${OSVERSION}
+COPY switchyard.exe /switchyard.exe
+USER ContainerAdministrator
+HEALTHCHECK --interval=10s --timeout=6s --start-period=5s CMD ["C:\\switchyard.exe", "health"]
+ENTRYPOINT ["C:\\switchyard.exe"]
