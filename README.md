@@ -121,6 +121,7 @@ services:
     dns: [172.30.0.2]
     volumes:
       - npm_data:/data
+      - npm_letsencrypt:/etc/letsencrypt
     networks: [switchyard]
     depends_on:
       switchyard:
@@ -129,6 +130,7 @@ services:
 
 volumes:
   npm_data: {}
+  npm_letsencrypt: {}
 
 networks:
   switchyard:

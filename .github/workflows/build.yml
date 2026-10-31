@@ -75,6 +75,13 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - name: Docker engine
+        shell: pwsh
+        run: |
+          Get-Service docker -ErrorAction SilentlyContinue | Format-List Name,Status,StartType
+          Get-WindowsFeature Containers -ErrorAction SilentlyContinue | Format-List Name,InstallState
+          if (Get-Service docker -ErrorAction SilentlyContinue) { Start-Service docker }
+          docker version
       - name: Build
         shell: bash
         run: CGO_ENABLED=0 go build -o switchyard.exe ./cmd/switchyard

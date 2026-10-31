@@ -15,6 +15,7 @@ networks:
 
 volumes:
   npmdata: {}
+  npmle: {}
 
 services:
   coredns:
@@ -81,6 +82,7 @@ services:
       - "127.0.0.1:8081:81"
     volumes:
       - npmdata:/data
+      - npmle:/etc/letsencrypt
     networks: [imp]
     depends_on:
       a:

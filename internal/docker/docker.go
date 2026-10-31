@@ -88,12 +88,31 @@ type Container struct {
 		Labels   map[string]string `json:"Labels"`
 		Hostname string            `json:"Hostname"`
 	} `json:"Config"`
-	State struct {
-		Running bool `json:"Running"`
-	} `json:"State"`
+	State           State `json:"State"`
 	NetworkSettings struct {
 		Networks map[string]Endpoint `json:"Networks"`
 	} `json:"NetworkSettings"`
+}
+
+// State is an object in inspect and a string ("running") in the container list.
+type State struct {
+	Running bool
+}
+
+func (s *State) UnmarshalJSON(b []byte) error {
+	var str string
+	if json.Unmarshal(b, &str) == nil {
+		s.Running = str == "running"
+		return nil
+	}
+	var o struct {
+		Running bool `json:"Running"`
+	}
+	if err := json.Unmarshal(b, &o); err != nil {
+		return err
+	}
+	s.Running = o.Running
+	return nil
 }
 
 // DisplayName is the container name without leading slash.
