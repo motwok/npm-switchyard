@@ -94,9 +94,52 @@ func TestShortOwnIPAndQuarantine(t *testing.T) {
 	}
 	tb.FreeShort("n.hb.switchyard", now)
 	free := tb.Free()
+	if gone := tb.Expire(now.Add(Quarantine)); tb.Free() != free+1 || len(gone) != 1 || gone[0] != e.Addr {
+		t.Fatal("address not released after quarantine", gone)
+	}
+}
+
+// A container that joins with a quarantined address keeps it after the quarantine.
+func TestJoinedDuringQuarantine(t *testing.T) {
+	p, own := pool(t)
+	tb := NewTable(p, own, nil)
+	e, _, _, _ := tb.Short("n.hb.switchyard", []int{443})
+	now := time.Now()
+	tb.FreeShort("n.hb.switchyard", now)
+	if name, conflict := tb.Joined(e.Addr); !conflict || name != "n.hb.switchyard" {
+		t.Fatal("conflict with a quarantined name not reported")
+	}
+	free := tb.Free()
 	tb.Expire(now.Add(Quarantine))
-	if tb.Free() != free+1 {
-		t.Fatal("address not released after quarantine")
+	if tb.Free() != free {
+		t.Fatal("member's address released")
+	}
+	if x, _, _, _ := tb.Short("m.hb.switchyard", []int{80}); x.Addr == e.Addr {
+		t.Fatal("member's address handed out")
+	}
+}
+
+func TestUndo(t *testing.T) {
+	p, own := pool(t)
+	tb := NewTable(p, own, []int{53})
+	free := tb.Free()
+	a, _, _ := tb.Long("a.80.hb.switchyard", 80)
+	c, newC, _ := tb.Long("c.80.hb.switchyard", 80) // collision: new address
+	tb.Undo(c, newC, nil)
+	if tb.Free() != free || len(tb.longIPs) != 1 {
+		t.Fatal("new long address not given back")
+	}
+	if _, ok := tb.Lookup("c.80.hb.switchyard"); ok {
+		t.Fatal("undone name still known")
+	}
+	tb.Undo(a, false, []int{80})
+	if !tb.portFree(own, 80) || a.Ports[80] {
+		t.Fatal("port not unmarked")
+	}
+	s, newS, _, _ := tb.Short("s.hb.switchyard", []int{1, 2})
+	tb.Undo(s, newS, nil)
+	if tb.Free() != free || len(tb.ShortNames()) != 0 {
+		t.Fatal("short address not given back")
 	}
 }
 

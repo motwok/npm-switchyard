@@ -44,12 +44,16 @@ func defaultTuning() tuning {
 
 // Importer is the import side on Linux.
 type Importer struct {
-	log    *slog.Logger
-	met    *metrics.Registry
-	open   Opener
-	npm    *npmconf.Store
-	fwd    *Forwarder
-	ownNet map[string]bool // names answered NXDOMAIN when falling back to 127.0.0.11 (DNS-5)
+	log  *slog.Logger
+	met  *metrics.Registry
+	open Opener
+	npm  *npmconf.Store
+	fwd  *Forwarder
+
+	// fallback is set when the forwarder uses 127.0.0.11; ownNet then holds the names Docker
+	// would answer from the agent's networks, answered NXDOMAIN instead (DNS-5). Guarded by mu.
+	fallback bool
+	ownNet   map[string]bool
 
 	Own     netip.Addr
 	bits    int
@@ -58,6 +62,7 @@ type Importer struct {
 	tune tuning
 
 	dc        *docker.Client
+	selfID    string
 	networkID string
 	network   string
 
@@ -140,13 +145,15 @@ func Setup(ctx context.Context, dc *docker.Client, selfID string, cfg *config.Co
 		ownNet:    map[string]bool{},
 		tune:      defaultTuning(),
 		dc:        dc,
+		selfID:    self.ID,
 		networkID: ep.NetworkID,
 		network:   cfg.ImportNetwork,
 	}
 	servers := ExtServers("/etc/resolv.conf", nw.EnableIPv6)
 	if len(servers) == 0 {
 		servers = []string{"127.0.0.11:53"}
-		im.fillOwnNames(ctx, dc, self)
+		im.fallback = true
+		im.ownNet = ownNames(ctx, dc, self)
 		log.Info("no reachable upstream DNS server, using 127.0.0.11")
 	}
 	im.fwd = NewForwarder(servers)
@@ -154,11 +161,12 @@ func Setup(ctx context.Context, dc *docker.Client, selfID string, cfg *config.Co
 	return im, nil
 }
 
-// fillOwnNames collects names Docker's resolver would answer from the agent's networks (DNS-5).
-func (im *Importer) fillOwnNames(ctx context.Context, dc *docker.Client, self docker.Container) {
+// ownNames collects the names Docker's resolver would answer from the agent's networks (DNS-5).
+func ownNames(ctx context.Context, dc *docker.Client, self docker.Container) map[string]bool {
+	out := map[string]bool{}
 	cs, err := dc.Running(ctx)
 	if err != nil {
-		return
+		return out
 	}
 	mine := map[string]string{}
 	for name, ep := range self.NetworkSettings.Networks {
@@ -177,11 +185,24 @@ func (im *Importer) fillOwnNames(ctx context.Context, dc *docker.Client, self do
 			ns = append(ns, ep.DNSNames...)
 			for _, n := range ns {
 				n = strings.ToLower(n)
-				im.ownNet[n] = true
-				im.ownNet[n+"."+nw] = true
+				out[n] = true
+				out[n+"."+nw] = true
 			}
 		}
 	}
+	return out
+}
+
+// refreshOwnNames re-reads the DNS-5 names after containers came or went.
+func (im *Importer) refreshOwnNames(ctx context.Context) {
+	self, err := im.dc.Inspect(ctx, im.selfID)
+	if err != nil {
+		return
+	}
+	m := ownNames(ctx, im.dc, self)
+	im.mu.Lock()
+	im.ownNet = m
+	im.mu.Unlock()
 }
 
 // interfaces is replaceable in tests.
@@ -248,12 +269,20 @@ func (im *Importer) expireLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			im.mu.Lock()
-			im.table.Expire(time.Now())
-			im.met.SetAddressesFree(im.table.Free())
-			im.mu.Unlock()
+			im.expire(time.Now())
 		}
 	}
+}
+
+// expire releases quarantined short names whose hour is over and drops their aliases (IMP-7).
+func (im *Importer) expire(now time.Time) {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	for _, a := range im.table.Expire(now) {
+		im.unalias(a)
+		im.log.Info("quarantine over, address released", "addr", a)
+	}
+	im.met.SetAddressesFree(im.table.Free())
 }
 
 // syncShort applies NPM changes to assigned short names (IMP-7).
@@ -273,7 +302,9 @@ func (im *Importer) syncShort() {
 			continue
 		}
 		if e, _, added, err := im.table.Short(n, ports); err == nil {
-			im.listenPorts(e, added)
+			if failed := im.listenPorts(e, added); len(failed) > 0 {
+				im.table.Undo(e, false, failed)
+			}
 		}
 	}
 }
@@ -323,14 +354,15 @@ func soa(ttl uint32) dns.RR {
 }
 
 func (im *Importer) forward(w dns.ResponseWriter, q *dns.Msg) {
-	if len(im.ownNet) > 0 {
-		n := strings.ToLower(strings.TrimSuffix(q.Question[0].Name, "."))
-		if im.ownNet[n] {
-			m := new(dns.Msg)
-			m.SetRcode(q, dns.RcodeNameError)
-			_ = w.WriteMsg(m)
-			return
-		}
+	n := strings.ToLower(strings.TrimSuffix(q.Question[0].Name, "."))
+	im.mu.Lock()
+	own := im.ownNet[n]
+	im.mu.Unlock()
+	if own {
+		m := new(dns.Msg)
+		m.SetRcode(q, dns.RcodeNameError)
+		_ = w.WriteMsg(m)
+		return
 	}
 	_, tcp := w.RemoteAddr().(*net.TCPAddr)
 	r := im.fwd.Exchange(q, tcp)
@@ -367,10 +399,9 @@ func (im *Importer) resolve(qn string) (*Entry, bool) {
 			im.full(key)
 			return nil, false
 		}
-		if newAddr && !im.alias(e) {
+		if !im.setUp(e, newAddr, added) {
 			return nil, false
 		}
-		im.listenPorts(e, added)
 		im.met.SetAddressesFree(im.table.Free())
 		return e, true
 	}
@@ -384,12 +415,35 @@ func (im *Importer) resolve(qn string) (*Entry, bool) {
 		im.full(key)
 		return nil, false
 	}
-	if newAddr && !im.alias(e) {
+	if !im.setUp(e, newAddr, []int{n.Port}) {
 		return nil, false
 	}
-	im.listenPorts(e, []int{n.Port})
 	im.met.SetAddressesFree(im.table.Free())
 	return e, true
+}
+
+// setUp adds a new entry's alias and the listeners of ports. On failure the entry (or only the
+// failed ports) is taken back, so the name is not answered and the next query tries again.
+// Caller holds im.mu.
+func (im *Importer) setUp(e *Entry, newAddr bool, ports []int) bool {
+	if newAddr && !im.alias(e) {
+		im.table.Undo(e, true, nil)
+		return false
+	}
+	failed := im.listenPorts(e, ports)
+	if len(failed) == 0 {
+		return true
+	}
+	if !newAddr {
+		im.table.Undo(e, false, failed)
+		return false
+	}
+	for _, p := range ports {
+		im.closeListener(netip.AddrPortFrom(e.Addr, uint16(p)))
+	}
+	im.unalias(e.Addr)
+	im.table.Undo(e, true, nil)
+	return false
 }
 
 func (im *Importer) full(name string) {
@@ -405,8 +459,15 @@ func (im *Importer) alias(e *Entry) bool {
 	return true
 }
 
-// listenPorts opens TCP and UDP listeners for an entry's ports (IMP-5). Caller holds im.mu.
-func (im *Importer) listenPorts(e *Entry, ports []int) {
+func (im *Importer) unalias(a netip.Addr) {
+	if err := delAlias(im.ifIndex, a.AsSlice(), im.bits); err != nil {
+		im.log.Error("remove address", "addr", a, "err", err)
+	}
+}
+
+// listenPorts opens TCP and UDP listeners for an entry's ports (IMP-5) and returns the ports
+// that could not be opened. Caller holds im.mu.
+func (im *Importer) listenPorts(e *Entry, ports []int) (failed []int) {
 	for _, p := range ports {
 		ap := netip.AddrPortFrom(e.Addr, uint16(p))
 		if im.listeners[ap] != nil {
@@ -415,12 +476,14 @@ func (im *Importer) listenPorts(e *Entry, ports []int) {
 		tl, err := net.Listen("tcp", ap.String())
 		if err != nil {
 			im.log.Error("listen tcp", "addr", ap, "name", e.Name, "err", err)
+			failed = append(failed, p)
 			continue
 		}
 		ul, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(ap))
 		if err != nil {
 			tl.Close()
 			im.log.Error("listen udp", "addr", ap, "name", e.Name, "err", err)
+			failed = append(failed, p)
 			continue
 		}
 		im.listeners[ap] = &listenerPair{tcp: tl, udp: ul}
@@ -429,6 +492,7 @@ func (im *Importer) listenPorts(e *Entry, ports []int) {
 		go im.serveUDP(ul, n, p)
 		im.log.Debug("listening", "addr", ap, "name", e.Name)
 	}
+	return failed
 }
 
 func (im *Importer) closeListener(ap netip.AddrPort) {
@@ -461,13 +525,7 @@ func (im *Importer) serveTCP(c net.Conn, n names.Name, port int) {
 			s.Close()
 		}
 		im.reset(c)
-		if n.Partner != config.LocalPartner {
-			res := "refused"
-			if err != nil {
-				res = "error"
-			}
-			im.met.StreamResult(n.Partner, res, metrics.Target{})
-		}
+		im.countRefused(n, err)
 		im.log.Debug("stream refused", "name", n.String(), "port", port, "status", wire.StatusReason(st), "err", err)
 		return
 	}
@@ -481,6 +539,19 @@ func (im *Importer) serveTCP(c net.Conn, n names.Name, port int) {
 	peer.Pipe(c, s, func(dir string, b int64) { im.met.AddBytes(n.Partner, dir, metrics.Target{}, b) })
 }
 
+// countRefused counts a refused or failed stream on the importing side (MET-2); local
+// streams are counted by the exporter.
+func (im *Importer) countRefused(n names.Name, err error) {
+	if n.Partner == config.LocalPartner {
+		return
+	}
+	res := "refused"
+	if err != nil {
+		res = "error"
+	}
+	im.met.StreamResult(n.Partner, res, metrics.Target{})
+}
+
 func (im *Importer) reset(c net.Conn) {
 	if tc, ok := c.(*net.TCPConn); ok {
 		_ = tc.SetLinger(0)
@@ -488,14 +559,23 @@ func (im *Importer) reset(c net.Conn) {
 	c.Close()
 }
 
+// udpFlow is one client's flow (TRN-3). Datagrams that arrive while its stream is being
+// opened wait in queue, so one slow open does not stall the other flows of the port.
+type udpFlow struct {
+	mu    sync.Mutex
+	s     net.Conn // nil until the stream is open
+	idle  *peer.Idle
+	queue [][]byte
+	dead  bool
+}
+
+// udpQueue bounds the datagrams kept per flow while its stream opens.
+const udpQueue = 16
+
 // serveUDP demultiplexes datagrams into one flow per client address (TRN-3).
 func (im *Importer) serveUDP(u *net.UDPConn, n names.Name, port int) {
-	type flow struct {
-		s    net.Conn
-		idle *peer.Idle
-	}
 	var mu sync.Mutex
-	flows := map[netip.AddrPort]*flow{}
+	flows := map[netip.AddrPort]*udpFlow{}
 	buf := make([]byte, 65535)
 	for {
 		k, from, err := u.ReadFromUDPAddrPort(buf)
@@ -505,57 +585,103 @@ func (im *Importer) serveUDP(u *net.UDPConn, n names.Name, port int) {
 		pkt := append([]byte(nil), buf[:k]...)
 		mu.Lock()
 		f := flows[from]
-		mu.Unlock()
 		if f == nil {
-			s, st, err := im.open.Open(context.Background(), n.Partner, im.target(n, port, wire.UDP))
-			if err != nil || st != wire.StatusOK {
-				if s != nil {
-					s.Close()
-				}
-				continue
-			}
-			f = &flow{s: s, idle: peer.WatchIdle(s)}
-			mu.Lock()
+			f = &udpFlow{}
 			flows[from] = f
-			mu.Unlock()
-			if n.Partner != config.LocalPartner {
-				im.met.StreamResult(n.Partner, "ok", metrics.Target{})
-				im.met.StreamStarted(n.Partner, metrics.Target{})
-			}
-			go func(from netip.AddrPort, f *flow) {
-				defer func() {
-					f.idle.Stop()
-					f.s.Close()
-					mu.Lock()
-					delete(flows, from)
-					mu.Unlock()
-					if n.Partner != config.LocalPartner {
-						im.met.StreamEnded(n.Partner, metrics.Target{})
-					}
-				}()
-				rb := make([]byte, 65535)
-				for {
-					m, err := im.readUDP(f.s, n.Partner == config.LocalPartner, rb)
-					if err != nil {
-						return
-					}
-					f.idle.Touch()
-					if _, err := u.WriteToUDPAddrPort(rb[:m], from); err != nil {
-						return
-					}
-					if n.Partner != config.LocalPartner {
-						im.met.AddBytes(n.Partner, "in", metrics.Target{}, int64(m))
-					}
-				}
-			}(from, f)
+			go im.runFlow(u, n, port, from, f, func() {
+				mu.Lock()
+				delete(flows, from)
+				mu.Unlock()
+			})
 		}
-		f.idle.Touch()
-		if err := im.writeUDP(f.s, n.Partner == config.LocalPartner, pkt); err != nil {
-			f.s.Close()
-			continue
+		mu.Unlock()
+		im.flowSend(f, n, pkt)
+	}
+}
+
+// flowSend writes a datagram to the flow's stream, or queues it until the stream is open.
+func (im *Importer) flowSend(f *udpFlow, n names.Name, pkt []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dead {
+		return
+	}
+	if f.s == nil {
+		if len(f.queue) < udpQueue {
+			f.queue = append(f.queue, pkt)
 		}
-		if n.Partner != config.LocalPartner {
-			im.met.AddBytes(n.Partner, "out", metrics.Target{}, int64(len(pkt)))
+		return
+	}
+	im.flowWrite(f, n, pkt)
+}
+
+// flowWrite sends one datagram on an open flow; a failed send ends the flow. Caller holds f.mu.
+func (im *Importer) flowWrite(f *udpFlow, n names.Name, pkt []byte) {
+	f.idle.Touch()
+	if err := im.writeUDP(f.s, n.Partner == config.LocalPartner, pkt); err != nil {
+		f.s.Close() // the reader ends and removes the flow
+		f.dead = true
+		return
+	}
+	if n.Partner != config.LocalPartner {
+		im.met.AddBytes(n.Partner, "out", metrics.Target{}, int64(len(pkt)))
+	}
+}
+
+// runFlow opens the flow's stream, sends what waited and relays replies until the flow ends.
+func (im *Importer) runFlow(u *net.UDPConn, n names.Name, port int, from netip.AddrPort, f *udpFlow, remove func()) {
+	local := n.Partner == config.LocalPartner
+	s, st, err := im.open.Open(context.Background(), n.Partner, im.target(n, port, wire.UDP))
+	if err != nil || st != wire.StatusOK {
+		if s != nil {
+			s.Close()
+		}
+		f.mu.Lock()
+		f.dead, f.queue = true, nil
+		f.mu.Unlock()
+		remove()
+		im.countRefused(n, err)
+		im.log.Debug("udp flow refused", "name", n.String(), "port", port, "status", wire.StatusReason(st), "err", err)
+		return
+	}
+	idle := peer.WatchIdle(s)
+	if !local {
+		im.met.StreamResult(n.Partner, "ok", metrics.Target{})
+		im.met.StreamStarted(n.Partner, metrics.Target{})
+	}
+	f.mu.Lock()
+	f.s, f.idle = s, idle
+	for _, pkt := range f.queue {
+		if f.dead {
+			break
+		}
+		im.flowWrite(f, n, pkt)
+	}
+	f.queue = nil
+	f.mu.Unlock()
+	defer func() {
+		idle.Stop()
+		s.Close()
+		f.mu.Lock()
+		f.dead = true
+		f.mu.Unlock()
+		remove()
+		if !local {
+			im.met.StreamEnded(n.Partner, metrics.Target{})
+		}
+	}()
+	rb := make([]byte, 65535)
+	for {
+		m, err := im.readUDP(s, local, rb)
+		if err != nil {
+			return
+		}
+		idle.Touch()
+		if _, err := u.WriteToUDPAddrPort(rb[:m], from); err != nil {
+			return
+		}
+		if !local {
+			im.met.AddBytes(n.Partner, "in", metrics.Target{}, int64(m))
 		}
 	}
 }

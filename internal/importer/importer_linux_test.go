@@ -4,6 +4,7 @@ package importer
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -12,6 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -21,6 +25,7 @@ import (
 	"github.com/motwok/npm-switchyard/internal/docker"
 	"github.com/motwok/npm-switchyard/internal/docker/dockertest"
 	"github.com/motwok/npm-switchyard/internal/metrics"
+	"github.com/motwok/npm-switchyard/internal/names"
 	"github.com/motwok/npm-switchyard/internal/npmconf"
 	"github.com/motwok/npm-switchyard/internal/wire"
 )
@@ -233,16 +238,19 @@ func TestRefusedStreamResets(t *testing.T) {
 func TestSyncShortFreesGoneNames(t *testing.T) {
 	im := newImporter(t)
 	// A short name already assigned (on the own address, no alias needed in the test).
+	port := freePort(t)
 	im.mu.Lock()
-	e := &Entry{Name: "n.b.switchyard", Addr: im.Own, Ports: map[int]bool{}, Short: true}
+	e := &Entry{Name: "n.b.switchyard", Addr: im.Own, Ports: map[int]bool{port: true}, Short: true}
 	im.table.names[e.Name] = e
+	im.listenPorts(e, []int{port})
 	im.mu.Unlock()
-	im.syncShort() // NPM store is empty: the name goes to quarantine
+	im.syncShort() // NPM store is empty: the name goes to quarantine, its listeners close
 	im.mu.Lock()
 	_, ok := im.table.Lookup("n.b.switchyard")
+	n := len(im.listeners)
 	im.mu.Unlock()
-	if ok {
-		t.Fatal("gone short name still active")
+	if ok || n != 0 {
+		t.Fatal("gone short name still active", ok, n)
 	}
 }
 
@@ -260,30 +268,39 @@ func TestRangeFullAndAlias(t *testing.T) {
 	full := newImporter(t)
 	empty, _ := NewPool(netip.MustParsePrefix("127.0.1.0/30"), netip.MustParsePrefix("127.0.1.0/30"), nil)
 	full.table = NewTable(empty, full.Own, nil)
-	query(full, "a."+strconv.Itoa(port)+".b.switchyard", dns.TypeA)
-	if r := query(full, "c."+strconv.Itoa(port)+".b.switchyard", dns.TypeA); r.Rcode != dns.RcodeNameError {
+	p2 := freePort(t)
+	if r := query(full, "a."+strconv.Itoa(p2)+".b.switchyard", dns.TypeA); r.Rcode != dns.RcodeSuccess {
+		t.Fatalf("own address: %v", r)
+	}
+	if r := query(full, "c."+strconv.Itoa(p2)+".b.switchyard", dns.TypeA); r.Rcode != dns.RcodeNameError {
 		t.Fatalf("full: %v", r)
 	}
 }
 
+// A port that cannot be listened on is not answered; once it is free the name works.
 func TestPortInUse(t *testing.T) {
 	im := newImporter(t)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
 	port := l.Addr().(*net.TCPAddr).Port
-	// Answered, but the listener cannot be opened; logged, no crash.
-	if r := query(im, "x."+strconv.Itoa(port)+".b.switchyard", dns.TypeA); r.Rcode != dns.RcodeSuccess {
+	name := "x." + strconv.Itoa(port) + ".b.switchyard"
+	if r := query(im, name, dns.TypeA); r.Rcode != dns.RcodeNameError {
 		t.Fatalf("%v", r)
+	}
+	l.Close()
+	if r := query(im, name, dns.TypeA); r.Rcode != dns.RcodeSuccess {
+		t.Fatalf("free port not answered: %v", r)
 	}
 	u, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer u.Close()
-	query(im, "y."+strconv.Itoa(u.LocalAddr().(*net.UDPAddr).Port)+".b.switchyard", dns.TypeA)
+	if r := query(im, "y."+strconv.Itoa(u.LocalAddr().(*net.UDPAddr).Port)+".b.switchyard", dns.TypeA); r.Rcode != dns.RcodeNameError {
+		t.Fatalf("udp port in use answered: %v", r)
+	}
 }
 
 func TestExpireLoop(t *testing.T) {
@@ -330,7 +347,9 @@ func TestWatchMembers(t *testing.T) {
 	f := dockertest.NewFake()
 	defer f.Close()
 	im := newImporter(t)
-	im.dc, im.networkID, im.network = f.Client(), "n-imp", "imp"
+	im.dc, im.networkID, im.network, im.selfID = f.Client(), "n-imp", "imp", "self"
+	im.fallback = true // container events refresh the DNS-5 names too
+	f.Set(dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{"imp": {NetworkID: "n-imp", IPAddress: "127.0.0.1"}}))
 	f.Set(dockertest.Ctr("late", "late", nil, map[string]docker.Endpoint{"imp": {NetworkID: "n-imp", IPAddress: "127.0.0.1"}}))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -342,6 +361,12 @@ func TestWatchMembers(t *testing.T) {
 	}{ID: "n-imp", Attributes: map[string]string{"container": "late"}}})
 	f.Emit(docker.Event{Type: "container", Action: "start"})
 	time.Sleep(200 * time.Millisecond)
+	im.mu.Lock()
+	own := im.ownNet["late.imp"]
+	im.mu.Unlock()
+	if !own {
+		t.Fatal("DNS-5 names not refreshed on the event")
+	}
 	f.CloseEvents()
 	time.Sleep(100 * time.Millisecond)
 	cancel()
@@ -478,19 +503,403 @@ func TestServeAndOwnNames(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	ready := make(chan struct{})
+	im.npm = npmconf.NewStore(filepath.Join(t.TempDir(), "missing")) // short names off
 	// Port 53 needs root; as a normal user Serve fails, as root it serves until ctx ends.
 	_ = im.Serve(ctx, ready)
 	cancel()
 
 	f.Set(dockertest.Ctr("c1", "db", nil, map[string]docker.Endpoint{"n": {NetworkID: "n1", DNSNames: []string{"db"}}}))
+	f.Set(dockertest.Ctr("c2", "elsewhere", nil, map[string]docker.Endpoint{"x": {NetworkID: "nx", DNSNames: []string{"elsewhere"}}}))
 	self := dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{"n": {NetworkID: "n1"}})
-	im.ownNet = map[string]bool{}
-	im.fillOwnNames(context.Background(), f.Client(), self)
-	if !im.ownNet["db"] || !im.ownNet["db.n"] {
-		t.Fatal(im.ownNet)
+	f.Set(self)
+	own := ownNames(context.Background(), f.Client(), self)
+	if !own["db"] || !own["db.n"] {
+		t.Fatal(own)
 	}
 	dead := docker.NewWithDialer(func(context.Context) (net.Conn, error) { return nil, io.EOF })
-	im.fillOwnNames(context.Background(), dead, self)
+	if len(ownNames(context.Background(), dead, self)) != 0 {
+		t.Fatal("names from a dead daemon")
+	}
+
+	// The list follows containers that come and go (DNS-5), read again on request.
+	im.fallback, im.selfID = true, "self"
+	im.ownNet = map[string]bool{}
+	im.refreshOwnNames(context.Background())
+	if r := query(im, "db.n", dns.TypeA); r.Rcode != dns.RcodeNameError {
+		t.Fatalf("new container not NXDOMAIN: %v", r)
+	}
+	f.Remove("c1")
+	im.refreshOwnNames(context.Background())
+	if r := query(im, "db.n", dns.TypeA); r.Rcode != dns.RcodeSuccess {
+		t.Fatalf("gone container still NXDOMAIN: %v", r)
+	}
+	im.dc = dead
+	im.refreshOwnNames(context.Background()) // unreachable daemon: list kept
+}
+
+// A failed alias takes the assignment back: the name stays NXDOMAIN instead of answering an
+// address nothing listens on, and the address returns to the pool.
+func TestAliasFailureRollsBack(t *testing.T) {
+	im := newImporter(t)
+	port := freePort(t)
+	query(im, "a."+strconv.Itoa(port)+".b.switchyard", dns.TypeA) // own address
+	free := im.table.Free()
+	fakeNetlink(t, errors.New("no netlink"), nil, nil, nil, nil)
+	name := "c." + strconv.Itoa(port) + ".b.switchyard"
+	for range 2 {
+		if r := query(im, name, dns.TypeA); r.Rcode != dns.RcodeNameError {
+			t.Fatalf("%v", r)
+		}
+		if im.table.Free() != free || len(im.table.longIPs) != 1 {
+			t.Fatal("assignment kept after a failed alias")
+		}
+	}
+	// The same for a short name, which always needs its own address.
+	dir := t.TempDir()
+	ph := filepath.Join(dir, "nginx", "proxy_host")
+	_ = os.MkdirAll(ph, 0o755)
+	_ = os.WriteFile(filepath.Join(ph, "1.conf"), []byte("set $server \"s.b.switchyard\";\nset $port "+strconv.Itoa(port)+";\n"), 0o644)
+	im.npm = npmconf.NewStore(dir)
+	if r := query(im, "s.b.switchyard", dns.TypeA); r.Rcode != dns.RcodeNameError || im.table.Free() != free {
+		t.Fatalf("short: %v", r)
+	}
+
+	// The alias works now (fake ack): the names get the next addresses, with listeners.
+	fakeNetlink(t, nil, nil, nil, nil, nlMsg(syscall.NLMSG_ERROR, 0))
+	r := query(im, name, dns.TypeA)
+	if r.Rcode != dns.RcodeSuccess || r.Answer[0].(*dns.A).A.String() != "127.0.0.2" {
+		t.Fatalf("%v", r)
+	}
+	c, err := net.Dial("tcp", "127.0.0.2:"+strconv.Itoa(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	if r := query(im, "s.b.switchyard", dns.TypeA); r.Rcode != dns.RcodeSuccess || r.Answer[0].(*dns.A).A.String() != "127.0.0.3" {
+		t.Fatalf("short: %v", r)
+	}
+
+	// Removing an alias can fail too; it is only logged.
+	fakeNetlink(t, nil, nil, nil, nil, nlMsg(syscall.NLMSG_ERROR, -int32(syscall.EPERM)))
+	im.unalias(netip.MustParseAddr("127.0.0.3"))
+}
+
+// A refused TCP stream that came with a connection closes it.
+func TestRefusedTCPWithConn(t *testing.T) {
+	im := newImporter(t)
+	closed := make(chan struct{})
+	a, b := net.Pipe()
+	defer b.Close()
+	im.open = funcOpener(func() (net.Conn, byte, error) {
+		go func() { _, _ = b.Read(make([]byte, 1)); close(closed) }()
+		return a, wire.StatusNoTarget, nil
+	})
+	port := freePort(t)
+	query(im, "web."+strconv.Itoa(port)+".b.switchyard", dns.TypeA)
+	c, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err == nil {
+		defer c.Close()
+	}
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refused stream not closed")
+	}
+}
+
+// Datagrams that arrive while the flow's stream opens wait, up to a limit, and are sent
+// once it is open; the other flows of the port are not held up.
+func TestUDPQueueWhileOpening(t *testing.T) {
+	im := newImporter(t)
+	release := make(chan struct{})
+	first := make(chan struct{}, 1)
+	a, b := net.Pipe()
+	defer b.Close()
+	im.open = funcOpener(func() (net.Conn, byte, error) {
+		first <- struct{}{}
+		<-release
+		return a, wire.StatusOK, nil
+	})
+	port := freePort(t)
+	query(im, "web."+strconv.Itoa(port)+".local.switchyard", dns.TypeA)
+	u, err := net.Dial("udp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.Close()
+	for i := range udpQueue + 4 {
+		_, _ = u.Write([]byte{byte(i)})
+	}
+	<-first
+	time.Sleep(100 * time.Millisecond) // all datagrams read and queued
+	close(release)
+	got := make([]byte, 1)
+	for i := range udpQueue {
+		_ = b.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := b.Read(got); err != nil || got[0] != byte(i) {
+			t.Fatalf("datagram %d: %v %v", i, got, err)
+		}
+	}
+	_ = b.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if _, err := b.Read(got); err == nil {
+		t.Fatal("datagram beyond the queue limit delivered")
+	}
+
+	// A dead flow drops what arrives.
+	im.flowSend(&udpFlow{dead: true}, names.Name{Partner: "local"}, []byte("x"))
+}
+
+// A queued datagram that cannot be sent ends the flow; the rest of the queue is dropped.
+func TestUDPQueueFlushFails(t *testing.T) {
+	im := newImporter(t)
+	release := make(chan struct{})
+	first := make(chan struct{}, 1)
+	a, b := net.Pipe()
+	b.Close() // every write on a fails
+	im.open = funcOpener(func() (net.Conn, byte, error) {
+		first <- struct{}{}
+		<-release
+		return a, wire.StatusOK, nil
+	})
+	port := freePort(t)
+	query(im, "web."+strconv.Itoa(port)+".local.switchyard", dns.TypeA)
+	u, _ := net.Dial("udp", "127.0.0.1:"+strconv.Itoa(port))
+	defer u.Close()
+	_, _ = u.Write([]byte("1"))
+	_, _ = u.Write([]byte("2"))
+	<-first
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	time.Sleep(100 * time.Millisecond) // the flow ends without a panic
+}
+
+// A partner flow is counted while open and ended when the stream closes.
+func TestUDPPartnerFlowEnds(t *testing.T) {
+	im := newImporter(t)
+	a, b := net.Pipe()
+	im.open = funcOpener(func() (net.Conn, byte, error) { return a, wire.StatusOK, nil })
+	port := freePort(t)
+	query(im, "web."+strconv.Itoa(port)+".b.switchyard", dns.TypeA)
+	u, _ := net.Dial("udp", "127.0.0.1:"+strconv.Itoa(port))
+	defer u.Close()
+	_, _ = u.Write([]byte("x"))
+	buf := make([]byte, 8)
+	_ = b.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if n, err := wire.ReadDatagram(b, buf); err != nil || string(buf[:n]) != "x" {
+		t.Fatal(n, err)
+	}
+	_ = wire.WriteDatagram(b, []byte("y"))
+	_ = u.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if n, err := u.Read(buf); err != nil || string(buf[:n]) != "y" {
+		t.Fatal(n, err)
+	}
+	_, _ = u.Write([]byte("z")) // on the open flow, no queue
+	if n, err := wire.ReadDatagram(b, buf); err != nil || string(buf[:n]) != "z" {
+		t.Fatal(n, err)
+	}
+	var sb strings.Builder
+	_ = im.met.Write(&sb)
+	if !strings.Contains(sb.String(), `switchyard_streams_active{peer="b"} 1`) {
+		t.Fatal(sb.String())
+	}
+	b.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sb.Reset()
+		_ = im.met.Write(&sb)
+		if !strings.Contains(sb.String(), "streams_active{") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(sb.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A directory that cannot be watched for another reason than "not there yet" is logged once.
+func TestWatchNPMBadDir(t *testing.T) {
+	im := newImporter(t)
+	buf := &logBuf{}
+	im.log = slog.New(slog.NewTextHandler(buf, nil))
+	im.tune.npmPoll = 20 * time.Millisecond
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "nginx"), []byte("not a directory"), 0o644)
+	im.npm = npmconf.NewStore(dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { im.watchNPM(ctx); close(done) }()
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	<-done
+	if n := strings.Count(buf.String(), "inotify watch"); n != 2 { // once per directory
+		t.Fatal(n, buf.String())
+	}
+}
+
+type logBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// A new address whose listener cannot be opened is given back, alias included.
+func TestNewAddressListenerFails(t *testing.T) {
+	im := newImporter(t)
+	port := freePort(t)
+	query(im, "a."+strconv.Itoa(port)+".b.switchyard", dns.TypeA)
+	busy, err := net.Listen("tcp", "127.0.0.2:"+strconv.Itoa(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	free := im.table.Free()
+	fakeNetlink(t, nil, nil, nil, nil, nlMsg(syscall.NLMSG_ERROR, 0))
+	if r := query(im, "c."+strconv.Itoa(port)+".b.switchyard", dns.TypeA); r.Rcode != dns.RcodeNameError {
+		t.Fatalf("%v", r)
+	}
+	if im.table.Free() != free || len(im.table.longIPs) != 1 || len(im.listeners) != 1 {
+		t.Fatal("assignment kept after a failed listener")
+	}
+}
+
+// A short name's new port that cannot be listened on is forgotten, so it is tried again.
+func TestSyncShortListenerFails(t *testing.T) {
+	im := newImporter(t)
+	busy, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer busy.Close()
+	bp := busy.Addr().(*net.TCPAddr).Port
+	dir := t.TempDir()
+	ph := filepath.Join(dir, "nginx", "proxy_host")
+	_ = os.MkdirAll(ph, 0o755)
+	_ = os.WriteFile(filepath.Join(ph, "1.conf"), []byte("set $server \"n.b.switchyard\";\nset $port "+strconv.Itoa(bp)+";\n"), 0o644)
+	im.npm = npmconf.NewStore(dir)
+	im.npm.Reload()
+	im.mu.Lock()
+	e := &Entry{Name: "n.b.switchyard", Addr: im.Own, Ports: map[int]bool{}, Short: true}
+	im.table.names[e.Name] = e
+	im.mu.Unlock()
+	im.syncShort()
+	if e.Ports[bp] {
+		t.Fatal("port without listener kept")
+	}
+}
+
+// An expired quarantine drops the alias and releases the address.
+func TestExpireDropsAlias(t *testing.T) {
+	im := newImporter(t)
+	fakeNetlink(t, nil, nil, nil, nil, nlMsg(syscall.NLMSG_ERROR, 0))
+	im.mu.Lock()
+	e, _, _, _ := im.table.Short("n.b.switchyard", []int{80})
+	im.table.FreeShort("n.b.switchyard", time.Now().Add(-2*Quarantine))
+	free := im.table.Free()
+	im.mu.Unlock()
+	im.expire(time.Now())
+	if _, ok := im.table.names[e.Name]; ok || im.table.Free() != free+1 {
+		t.Fatal("quarantined name not released")
+	}
+}
+
+func TestRefreshMembers(t *testing.T) {
+	f := dockertest.NewFake()
+	defer f.Close()
+	im := newImporter(t)
+	im.dc, im.networkID, im.network, im.selfID = f.Client(), "n-imp", "imp", "self"
+	n := docker.Network{ID: "n-imp", Name: "imp"}
+	n.Containers = map[string]struct {
+		Name        string `json:"Name"`
+		IPv4Address string `json:"IPv4Address"`
+	}{"c1": {Name: "late", IPv4Address: "127.0.0.9/24"}, "c2": {Name: "bad", IPv4Address: "nonsense"}}
+	f.Networks["n-imp"] = n
+	f.Set(dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{"imp": {NetworkID: "n-imp", IPAddress: "127.0.0.1"}}))
+	f.Set(dockertest.Ctr("c1", "late", nil, map[string]docker.Endpoint{"imp": {NetworkID: "n-imp", IPAddress: "127.0.0.9", DNSNames: []string{"late"}}}))
+	free := im.table.Free()
+	im.fallback = true
+	im.refreshMembers(context.Background())
+	if im.table.Free() != free-1 {
+		t.Fatal("member address not reserved")
+	}
+	// A member with an address a name already uses: logged as a conflict.
+	buf := &logBuf{}
+	im.log = slog.New(slog.NewTextHandler(buf, nil))
+	n.Containers["c3"] = struct {
+		Name        string `json:"Name"`
+		IPv4Address string `json:"IPv4Address"`
+	}{Name: "clash", IPv4Address: "127.0.0.2/24"}
+	f.Networks["n-imp"] = n
+	im.mu.Lock()
+	_, _, _, _ = im.table.Short("s.b.switchyard", []int{80}) // takes 127.0.0.2
+	im.mu.Unlock()
+	im.refreshMembers(context.Background())
+	if !strings.Contains(buf.String(), "address the agent uses") {
+		t.Fatal(buf.String())
+	}
+	im.mu.Lock()
+	own := im.ownNet["late.imp"]
+	im.mu.Unlock()
+	if !own {
+		t.Fatal("DNS-5 names not refreshed")
+	}
+	im.networkID = "missing"
+	im.refreshMembers(context.Background()) // unknown network: nothing happens
+}
+
+func TestInotifyEvents(t *testing.T) {
+	ev := func(wd int32, mask uint32, name string) []byte {
+		b := make([]byte, syscall.SizeofInotifyEvent+len(name))
+		binary.NativeEndian.PutUint32(b[0:], uint32(wd))
+		binary.NativeEndian.PutUint32(b[4:], mask)
+		binary.NativeEndian.PutUint32(b[12:], uint32(len(name)))
+		copy(b[syscall.SizeofInotifyEvent:], name)
+		return b
+	}
+	buf := append(ev(1, syscall.IN_CREATE, "1.conf\x00\x00"), ev(2, syscall.IN_IGNORED, "")...)
+	buf = append(buf, 1, 2, 3) // trailing garbage is ignored
+	got := inotifyEvents(buf)
+	if len(got) != 2 || got[0].wd != 1 || got[0].mask != syscall.IN_CREATE || got[1].wd != 2 || got[1].mask != syscall.IN_IGNORED {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// A watched NPM directory that is deleted and created again is watched again.
+func TestWatchNPMDirRecreated(t *testing.T) {
+	im := newImporter(t)
+	im.tune.npmPoll = 20 * time.Millisecond
+	dir := t.TempDir()
+	im.npm = npmconf.NewStore(dir)
+	ph := filepath.Join(dir, "nginx", "proxy_host")
+	_ = os.MkdirAll(ph, 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "nginx", "stream"), 0o755)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { im.watchNPM(ctx); close(done) }()
+	time.Sleep(200 * time.Millisecond)
+	_ = os.RemoveAll(ph)
+	time.Sleep(300 * time.Millisecond) // IN_IGNORED processed
+	_ = os.MkdirAll(ph, 0o755)
+	time.Sleep(200 * time.Millisecond) // watched again by the poll
+	port := freePort(t)
+	_ = os.WriteFile(filepath.Join(ph, "1.conf"), []byte("set $server \"web.b.switchyard\";\nset $port "+strconv.Itoa(port)+";\n"), 0o644)
+	deadline := time.Now().Add(10 * time.Second)
+	for im.npm.Ports("web.b.switchyard") == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("recreated directory not watched")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	<-done
 }
 
 func TestSyscallFailures(t *testing.T) {
