@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	pingEvery   = 10 * time.Second
 	deadAfter   = 30 * time.Second
 	backoffMin  = time.Second
 	backoffMax  = 30 * time.Second
@@ -27,6 +26,12 @@ const (
 
 // requestWait bounds how long a listener waits for the dialer to attach a stream.
 var requestWait = 15 * time.Second
+
+// pingEvery is the keepalive interval on the control channel (PAR-5).
+var pingEvery = 10 * time.Second
+
+// acceptRetry is the pause after a failed accept on the partner port.
+var acceptRetry = time.Second
 
 // statusTimeout bounds the wait for the exporting side's stream status.
 var statusTimeout = 15 * time.Second
@@ -47,7 +52,7 @@ type Manager struct {
 	log      *slog.Logger
 
 	// Copied from the package defaults at New, so tests can shorten them.
-	requestWait, statusTimeout time.Duration
+	requestWait, statusTimeout, pingEvery, acceptRetry time.Duration
 
 	mu    sync.Mutex
 	state []*partnerState
@@ -69,7 +74,7 @@ type partnerState struct {
 
 func New(local *wire.Local, partners []config.Partner, exp Exporter, met *metrics.Registry, log *slog.Logger) *Manager {
 	m := &Manager{local: local, partners: partners, exp: exp, met: met, log: log,
-		requestWait: requestWait, statusTimeout: statusTimeout}
+		requestWait: requestWait, statusTimeout: statusTimeout, pingEvery: pingEvery, acceptRetry: acceptRetry}
 	for i, p := range partners {
 		m.state = append(m.state, &partnerState{idx: i, name: p.Name, addr: p.Address, pending: map[uint32]chan *wire.Conn{}})
 		met.SetPeerUp(p.Name, false)
@@ -114,7 +119,7 @@ func (m *Manager) acceptLoop(ctx context.Context, l net.Listener) {
 				return
 			}
 			m.log.Warn("accept", "err", err)
-			time.Sleep(time.Second)
+			time.Sleep(m.acceptRetry)
 			continue
 		}
 		go m.handleIncoming(ctx, raw)
@@ -247,7 +252,7 @@ func (m *Manager) controlLoop(ctx context.Context, s *partnerState, c *wire.Conn
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
-		t := time.NewTicker(pingEvery)
+		t := time.NewTicker(m.pingEvery)
 		defer t.Stop()
 		for {
 			select {
@@ -315,11 +320,7 @@ func (m *Manager) keepSpares(ctx context.Context, s *partnerState, gen int) {
 			c.Close()
 			return
 		}
-		select {
-		case s.spares <- c:
-		default:
-			c.Close()
-		}
+		s.spares <- c // never blocks: only this goroutine fills it, and it was below want
 		s.mu.Unlock()
 	}
 }

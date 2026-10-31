@@ -259,6 +259,9 @@ func (l *Local) Accept(raw net.Conn) (*Conn, error) {
 	return &Conn{Conn: c, Partner: idx, PeerID: h.id, Version: v, Kind: h.kind, PeerAddr: raw.RemoteAddr()}, nil
 }
 
+// createCertificate is replaceable in tests.
+var createCertificate = x509.CreateCertificate
+
 func certFor(k ed25519.PrivateKey) (tls.Certificate, error) {
 	serial, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
 	tmpl := &x509.Certificate{
@@ -269,7 +272,7 @@ func certFor(k ed25519.PrivateKey) (tls.Certificate, error) {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, k.Public(), k)
+	der, err := createCertificate(rand.Reader, tmpl, tmpl, k.Public(), k)
 	if err != nil {
 		return tls.Certificate{}, err
 	}

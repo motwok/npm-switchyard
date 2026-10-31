@@ -4,6 +4,7 @@ package importer
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -491,4 +492,58 @@ func TestServeAndOwnNames(t *testing.T) {
 	}
 	dead := docker.NewWithDialer(func(context.Context) (net.Conn, error) { return nil, io.EOF })
 	im.fillOwnNames(context.Background(), dead, self)
+}
+
+func TestSyscallFailures(t *testing.T) {
+	old := sysInotifyInit
+	sysInotifyInit = func(int) (int, error) { return -1, errors.New("no inotify") }
+	im := newImporter(t)
+	im.watchNPM(context.Background()) // logs and returns
+	sysInotifyInit = old
+
+	oldIf := interfaces
+	interfaces = func() ([]net.Interface, error) { return nil, errors.New("no interfaces") }
+	if _, err := ifaceFor(netip.MustParseAddr("127.0.0.1")); err == nil {
+		t.Fatal("interface error ignored")
+	}
+	interfaces = oldIf
+}
+
+func TestMembersBackoff(t *testing.T) {
+	lo, hi := memberBackoffMin, memberBackoffMax
+	memberBackoffMin, memberBackoffMax = 10*time.Millisecond, 30*time.Millisecond
+	f := dockertest.NewFake()
+	defer f.Close()
+	im := newImporter(t)
+	im.dc = f.Client()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { im.watchMembers(ctx); close(done) }()
+	time.Sleep(100 * time.Millisecond) // the stream outlives the backoff limit
+	f.CloseEvents()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+	memberBackoffMin = time.Hour // cancel while waiting
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan struct{})
+	go func() { im.watchMembers(ctx2); close(done2) }()
+	time.Sleep(100 * time.Millisecond)
+	cancel2()
+	<-done2
+	memberBackoffMin, memberBackoffMax = lo, hi
+}
+
+func TestNPMPollAndStop(t *testing.T) {
+	old := npmPoll
+	npmPoll = 20 * time.Millisecond
+	im := newImporter(t)
+	im.npm = npmconf.NewStore(t.TempDir()) // directories never appear
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { im.watchNPM(ctx); close(done) }()
+	time.Sleep(100 * time.Millisecond)
+	cancel() // closes the inotify descriptor: the read loop ends
+	<-done
+	npmPoll = old
 }

@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
+	"io"
 	"math/big"
 	"net"
 	"testing"
@@ -116,5 +118,26 @@ func TestDialNoHello(t *testing.T) {
 	}()
 	if _, err := la.Dial(c1, 0, KindControl); err == nil {
 		t.Fatal("listener without hello accepted")
+	}
+}
+
+func TestCertificateFailure(t *testing.T) {
+	old := createCertificate
+	defer func() { createCertificate = old }()
+	createCertificate = func(io.Reader, *x509.Certificate, *x509.Certificate, any, any) ([]byte, error) {
+		return nil, errors.New("no certificate")
+	}
+	if _, err := NewLocal(key(1), nil); err == nil {
+		t.Fatal("global certificate error ignored")
+	}
+	calls := 0
+	createCertificate = func(r io.Reader, a, b *x509.Certificate, p, k any) ([]byte, error) {
+		if calls++; calls > 1 {
+			return nil, errors.New("no certificate")
+		}
+		return old(r, a, b, p, k)
+	}
+	if _, err := NewLocal(key(1), []Partner{{Own: key(2), Peer: pub(key(3))}}); err == nil {
+		t.Fatal("partner certificate error ignored")
 	}
 }

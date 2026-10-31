@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -296,5 +300,49 @@ func TestHealthNot200(t *testing.T) {
 	_ = os.WriteFile(f, []byte("private_key: "+key+"\nmetrics: "+strconv.Itoa(srv.Listener.Addr().(*net.TCPAddr).Port)+"\n"), 0o644)
 	if health(f) != 1 {
 		t.Fatal("404 reported healthy")
+	}
+}
+
+func TestLoadImportPlatform(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "c.yml")
+	_ = os.WriteFile(f, []byte("private_key: "+key+"\nimport_network: imp\n"), 0o644)
+	_, err := load(f)
+	if (err == nil) != (runtime.GOOS == "linux") {
+		t.Fatalf("%s: %v", runtime.GOOS, err)
+	}
+}
+
+func TestPubkeyReadError(t *testing.T) {
+	r, w, _ := os.Pipe()
+	w.Close()
+	r.Close() // reading a closed file fails
+	old := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = old }()
+	if pubkey() != 1 {
+		t.Fatal("read error ignored")
+	}
+}
+
+// main itself, in a child process (os.Exit); its coverage goes to the same directory.
+func TestMainProcess(t *testing.T) {
+	if os.Getenv("SY_MAIN") == "1" {
+		os.Args = []string{"switchyard", "bogus"}
+		main()
+		return
+	}
+	args := []string{"-test.run=^TestMainProcess$"}
+	if f := flag.Lookup("test.gocoverdir"); f != nil && f.Value.String() != "" {
+		args = append(args, "-test.gocoverdir="+f.Value.String())
+	}
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Env = append(os.Environ(), "SY_MAIN=1")
+	if f := flag.Lookup("test.gocoverdir"); f != nil && f.Value.String() != "" {
+		cmd.Env = append(cmd.Env, "GOCOVERDIR="+f.Value.String()) // written by os.Exit
+	}
+	err := cmd.Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 2 {
+		t.Fatalf("exit: %v", err)
 	}
 }

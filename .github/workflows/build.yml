@@ -40,6 +40,25 @@ jobs:
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/switchyard
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/switchyard
 
+  unit-windows:
+    name: Unit tests (Windows)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Test
+        shell: bash
+        run: |
+          mkdir -p "$PWD/cover-unit-windows"
+          pkgs=$(go list ./... | grep -v /dockertest | paste -sd, -)
+          go test -covermode=atomic -coverpkg="$pkgs" -cover ./... -args -test.gocoverdir="$PWD/cover-unit-windows"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cover-unit-windows
+          path: cover-unit-windows
+
   integration:
     name: Integration (${{ matrix.arch }})
     strategy:
@@ -82,7 +101,7 @@ jobs:
 
   coverage:
     name: Coverage
-    needs: [unit, integration, npm]
+    needs: [unit, unit-windows, integration, npm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -99,7 +118,7 @@ jobs:
           go tool covdata textfmt -i="$dirs" -o cover.txt
           go tool cover -html=cover.txt -o coverage.html
           {
-            echo "## Coverage (unit + integration)"
+            echo "## Coverage (unit on Linux and Windows + integration)"
             echo '```'
             go tool covdata percent -i="$dirs"
             go tool cover -func=cover.txt | tail -1

@@ -227,3 +227,26 @@ func TestRefreshErrors(t *testing.T) {
 	<-done
 	e.Track(&net.TCPConn{}, metrics.Target{})() // not a target connection: nothing to track
 }
+
+// A stream that ran longer than the backoff limit resets the backoff; a cancel during the
+// wait ends Run.
+func TestRunBackoff(t *testing.T) {
+	f, e := setup(t)
+	e.backoffMin, e.backoffMax = 10*time.Millisecond, 30*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { e.Run(ctx); close(done) }()
+	time.Sleep(100 * time.Millisecond) // longer than backoffMax
+	f.CloseEvents()                    // stream lost, later ones fail at once
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+
+	e.backoffMin = time.Hour // cancel while waiting
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan struct{})
+	go func() { e.Run(ctx2); close(done2) }()
+	time.Sleep(100 * time.Millisecond)
+	cancel2()
+	<-done2
+}

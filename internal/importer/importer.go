@@ -171,8 +171,11 @@ func (im *Importer) fillOwnNames(ctx context.Context, dc *docker.Client, self do
 	}
 }
 
+// interfaces is replaceable in tests.
+var interfaces = net.Interfaces
+
 func ifaceFor(a netip.Addr) (int, error) {
-	ifs, err := net.Interfaces()
+	ifs, err := interfaces()
 	if err != nil {
 		return 0, err
 	}

@@ -105,7 +105,6 @@ func PipeUDPExport(s net.Conn, u net.Conn, count func(dir string, n int64)) {
 	for {
 		n, err := wire.ReadDatagram(s, buf)
 		if err != nil {
-			u.Close()
 			break
 		}
 		idle.Touch()
@@ -114,5 +113,6 @@ func PipeUDPExport(s net.Conn, u net.Conn, count func(dir string, n int64)) {
 		}
 		count("out", int64(n))
 	}
+	u.Close() // ends the reader at once, e.g. after a failed send
 	<-done
 }

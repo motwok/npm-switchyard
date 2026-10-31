@@ -8,10 +8,17 @@ import (
 	"time"
 )
 
+// sysInotifyInit is replaceable in tests; npmPoll is how often missing directories are retried.
+var (
+	sysInotifyInit = syscall.InotifyInit1
+	npmPoll        = 5 * time.Second
+)
+
 // watchNPM re-reads NPM's files on every change in its directories (NPM-1). Directories NPM
 // has not created yet are picked up as soon as they appear.
 func (im *Importer) watchNPM(ctx context.Context) {
-	fd, err := syscall.InotifyInit1(syscall.IN_CLOEXEC)
+	poll := npmPoll
+	fd, err := sysInotifyInit(syscall.IN_CLOEXEC)
 	if err != nil {
 		im.log.Error("inotify", "err", err)
 		return
@@ -45,7 +52,7 @@ func (im *Importer) watchNPM(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(poll):
 			}
 		}
 	}()
