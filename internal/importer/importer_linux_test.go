@@ -125,6 +125,7 @@ func newImporter(t *testing.T) *Importer {
 		bits:      24,
 		table:     NewTable(pool, own, []int{53}),
 		listeners: map[netip.AddrPort]*listenerPair{},
+		tune:      defaultTuning(),
 	}
 	t.Cleanup(func() {
 		im.mu.Lock()
@@ -286,10 +287,8 @@ func TestPortInUse(t *testing.T) {
 }
 
 func TestExpireLoop(t *testing.T) {
-	old := expireEvery
-	expireEvery = 20 * time.Millisecond
-	defer func() { expireEvery = old }()
 	im := newImporter(t)
+	im.tune.expireEvery = 20 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { im.expireLoop(ctx); close(done) }()
@@ -495,11 +494,9 @@ func TestServeAndOwnNames(t *testing.T) {
 }
 
 func TestSyscallFailures(t *testing.T) {
-	old := sysInotifyInit
-	sysInotifyInit = func(int) (int, error) { return -1, errors.New("no inotify") }
 	im := newImporter(t)
+	im.tune.inotifyInit = func(int) (int, error) { return -1, errors.New("no inotify") }
 	im.watchNPM(context.Background()) // logs and returns
-	sysInotifyInit = old
 
 	oldIf := interfaces
 	interfaces = func() ([]net.Interface, error) { return nil, errors.New("no interfaces") }
@@ -510,12 +507,11 @@ func TestSyscallFailures(t *testing.T) {
 }
 
 func TestMembersBackoff(t *testing.T) {
-	lo, hi := memberBackoffMin, memberBackoffMax
-	memberBackoffMin, memberBackoffMax = 10*time.Millisecond, 30*time.Millisecond
 	f := dockertest.NewFake()
 	defer f.Close()
 	im := newImporter(t)
 	im.dc = f.Client()
+	im.tune.backoffMin, im.tune.backoffMax = 10*time.Millisecond, 30*time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { im.watchMembers(ctx); close(done) }()
@@ -524,20 +520,18 @@ func TestMembersBackoff(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	cancel()
 	<-done
-	memberBackoffMin = time.Hour // cancel while waiting
+	im.tune.backoffMin = time.Hour // cancel while waiting
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	done2 := make(chan struct{})
 	go func() { im.watchMembers(ctx2); close(done2) }()
 	time.Sleep(100 * time.Millisecond)
 	cancel2()
 	<-done2
-	memberBackoffMin, memberBackoffMax = lo, hi
 }
 
 func TestNPMPollAndStop(t *testing.T) {
-	old := npmPoll
-	npmPoll = 20 * time.Millisecond
 	im := newImporter(t)
+	im.tune.npmPoll = 20 * time.Millisecond
 	im.npm = npmconf.NewStore(t.TempDir()) // directories never appear
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -545,5 +539,4 @@ func TestNPMPollAndStop(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	cancel() // closes the inotify descriptor: the read loop ends
 	<-done
-	npmPoll = old
 }

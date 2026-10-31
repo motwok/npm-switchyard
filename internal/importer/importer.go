@@ -29,8 +29,18 @@ const (
 	ttlNegative = 5
 )
 
-// expireEvery is how often quarantined short names are released.
-var expireEvery = time.Minute
+// tuning holds timers and hooks per importer, so tests can change them without races.
+type tuning struct {
+	expireEvery            time.Duration // release of quarantined short names
+	npmPoll                time.Duration // retry for NPM directories that do not exist yet
+	backoffMin, backoffMax time.Duration // event stream reconnect
+	inotifyInit            func(int) (int, error)
+}
+
+func defaultTuning() tuning {
+	return tuning{expireEvery: time.Minute, npmPoll: 5 * time.Second, backoffMin: time.Second,
+		backoffMax: time.Minute, inotifyInit: inotifyInit1}
+}
 
 // Importer is the import side on Linux.
 type Importer struct {
@@ -44,6 +54,8 @@ type Importer struct {
 	Own     netip.Addr
 	bits    int
 	ifIndex int
+
+	tune tuning
 
 	dc        *docker.Client
 	networkID string
@@ -126,6 +138,7 @@ func Setup(ctx context.Context, dc *docker.Client, selfID string, cfg *config.Co
 		table:     NewTable(pool, own, []int{53, cfg.Listen, cfg.Metrics}),
 		listeners: map[netip.AddrPort]*listenerPair{},
 		ownNet:    map[string]bool{},
+		tune:      defaultTuning(),
 		dc:        dc,
 		networkID: ep.NetworkID,
 		network:   cfg.ImportNetwork,
@@ -228,7 +241,7 @@ func (im *Importer) Serve(ctx context.Context, ready chan<- struct{}) error {
 }
 
 func (im *Importer) expireLoop(ctx context.Context) {
-	t := time.NewTicker(expireEvery)
+	t := time.NewTicker(im.tune.expireEvery)
 	defer t.Stop()
 	for {
 		select {

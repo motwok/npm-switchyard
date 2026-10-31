@@ -10,13 +10,10 @@ import (
 	"github.com/motwok/npm-switchyard/internal/docker"
 )
 
-// Event stream reconnect backoff for the import network; variables so tests can shorten them.
-var memberBackoffMin, memberBackoffMax = time.Second, time.Minute
-
 // watchMembers follows containers joining the import network: a fixed address outside
 // ip_range is taken out of the pool, or logged if the agent already uses it (IMP-8).
 func (im *Importer) watchMembers(ctx context.Context) {
-	lo, hi := memberBackoffMin, memberBackoffMax
+	lo, hi := im.tune.backoffMin, im.tune.backoffMax
 	wait := lo
 	for ctx.Err() == nil {
 		start := time.Now()
