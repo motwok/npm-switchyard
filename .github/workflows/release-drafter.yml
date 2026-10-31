@@ -3,6 +3,8 @@ name: Release Drafter
 on:
   push:
     branches: [master]
+    # Only changes that make a release (same files as the release check in build.yml).
+    paths: ["**.go", go.mod, go.sum, Dockerfile, Dockerfile.windows]
   # pull_request_target: fork PRs get a read-only token on pull_request; no PR code is checked out
   pull_request_target:
     types: [opened, reopened, synchronize, edited]
