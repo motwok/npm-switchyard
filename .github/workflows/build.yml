@@ -161,20 +161,28 @@ jobs:
         env:
           V: ${{ steps.drafter.outputs.resolved_version }}
           IMG: ghcr.io/motwok/npm-switchyard
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$V" \
             -o switchyard.exe ./cmd/switchyard
+          auth="Authorization: Bearer $(printf %s "$GH_TOKEN" | base64 -w0)"
           files=""
           for os in 1809 ltsc2022 ltsc2025; do
             ref="$IMG:$V-windows-$os"
             docker buildx build --platform windows/amd64 -f Dockerfile.windows --build-arg OSVERSION=$os \
               --provenance=false --push -t "$ref" .
             # Docker on Windows picks the variant by os.version, which buildx does not set.
-            desc=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}')
+            # Digest and size come from the registry, as stored.
+            hdr=$(curl -fsSI -H "$auth" \
+              -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/motwok/npm-switchyard/manifests/$V-windows-$os" | tr -d '\r')
+            digest=$(echo "$hdr" | sed -n 's/^docker-content-digest: //Ip')
+            size=$(echo "$hdr" | sed -n 's/^content-length: //Ip')
+            mt=$(echo "$hdr" | sed -n 's/^content-type: //Ip')
             osv=$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}' | jq -r '."os.version"')
-            [ -n "$osv" ] && [ "$osv" != null ] || { echo "no os.version in $ref"; exit 1; }
-            echo "$desc" | jq -c --arg v "$osv" \
-              '{mediaType, digest, size, platform: {architecture: "amd64", os: "windows", "os.version": $v}}' \
+            [ -n "$digest" ] && [ -n "$size" ] && [ -n "$osv" ] && [ "$osv" != null ] || { echo "no descriptor for $ref"; exit 1; }
+            jq -nc --arg mt "$mt" --arg d "$digest" --argjson s "$size" --arg v "$osv" \
+              '{mediaType: $mt, digest: $d, size: $s, platform: {architecture: "amd64", os: "windows", "os.version": $v}}' \
               > "win-$os.json"
             files="$files -f win-$os.json"
           done
