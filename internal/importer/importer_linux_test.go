@@ -472,14 +472,16 @@ func TestListenTwice(t *testing.T) {
 
 func TestServeAndOwnNames(t *testing.T) {
 	im := newImporter(t)
+	f := dockertest.NewFake()
+	defer f.Close()
+	im.dc, im.networkID, im.network = f.Client(), "n-imp", "imp"
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	ready := make(chan struct{})
 	// Port 53 needs root; as a normal user Serve fails, as root it serves until ctx ends.
 	_ = im.Serve(ctx, ready)
+	cancel()
 
-	f := dockertest.NewFake()
-	defer f.Close()
 	f.Set(dockertest.Ctr("c1", "db", nil, map[string]docker.Endpoint{"n": {NetworkID: "n1", DNSNames: []string{"db"}}}))
 	self := dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{"n": {NetworkID: "n1"}})
 	im.ownNet = map[string]bool{}
