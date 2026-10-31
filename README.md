@@ -122,6 +122,13 @@ services:
     networks:
       switchyard:
         ipv4_address: 172.30.0.2  # fixed, outside ip_range
+      local: {}                   # optional, see below
+
+  # Optional: a container reached as node-exporter.9100.local.switchyard, e.g. by a Prometheus
+  # in the import network. Note: it is reachable for every partner too.
+  node-exporter:
+    image: prom/node-exporter:latest
+    networks: [local]
 
   npm:
     image: jc21/nginx-proxy-manager:latest
@@ -142,6 +149,7 @@ volumes:
 networks:
   switchyard:
     external: true
+  local: {}
 ```
 
 In Nginx Proxy Manager set the forward host to `nextcloud.8080.hostb.switchyard` and the forward port to
@@ -155,6 +163,12 @@ In Nginx Proxy Manager set the forward host to `nextcloud.8080.hostb.switchyard`
   outside `ip_range`. When none is left, new names do not resolve; `switchyard_addresses_free` shows it
   in advance. A restart frees the addresses.
 - One side of each pair needs an `address`; the side without one waits for the partner to dial.
+- **What this host exports:** nothing from `switchyard`, the import network is never exported, so
+  Nginx Proxy Manager is not reachable for partners. Only containers in the agent's other networks are
+  exported: here those in `local`, reachable as `<container>.<port>.local.switchyard` on this host and
+  as `<container>.<port>.<this host>.switchyard` for partners. Without `local` the host only imports.
+  Always list the agent's `networks:`; otherwise compose adds the stack's default network, and
+  everything in it is exported.
 
 ### Windows (export only)
 
