@@ -48,7 +48,7 @@ func TestAddAlias(t *testing.T) {
 		{"bind", nil, boom, nil, nil, nil, false},
 		{"send", nil, nil, boom, nil, nil, false},
 		{"recv", nil, nil, nil, boom, nil, false},
-		{"garbage", nil, nil, nil, nil, []byte{1, 2, 3}, false},
+		{"garbage", nil, nil, nil, nil, badLength(), false},
 		{"ack", nil, nil, nil, nil, nlMsg(syscall.NLMSG_ERROR, 0), true},
 		{"exists", nil, nil, nil, nil, nlMsg(syscall.NLMSG_ERROR, -int32(syscall.EEXIST)), true},
 		{"denied", nil, nil, nil, nil, nlMsg(syscall.NLMSG_ERROR, -int32(syscall.EPERM)), false},
@@ -60,4 +60,11 @@ func TestAddAlias(t *testing.T) {
 			t.Errorf("%s: %v", c.name, err)
 		}
 	}
+}
+
+// badLength is a netlink header that claims more bytes than there are.
+func badLength() []byte {
+	b := make([]byte, syscall.NLMSG_HDRLEN)
+	binary.NativeEndian.PutUint32(b[0:], 100)
+	return b
 }

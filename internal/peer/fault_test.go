@@ -87,21 +87,16 @@ func TestPingFails(t *testing.T) {
 
 func TestClosedSparePool(t *testing.T) {
 	a, _ := pair(t, true, false)
-	s := a.state[0]
 	ch := make(chan *wire.Conn)
 	close(ch)
-	s.mu.Lock()
-	old := s.spares
-	s.spares = ch
-	s.mu.Unlock()
+	// A separate state with a closed pool, as after a lost control channel.
+	s := &partnerState{idx: 0, name: "b", spares: ch}
+	s.addr = a.state[0].addr
 	c, err := a.streamConn(context.Background(), s) // falls back to a fresh dial
 	if err != nil {
 		t.Fatal(err)
 	}
 	c.Close()
-	s.mu.Lock()
-	s.spares = old
-	s.mu.Unlock()
 }
 
 // Only dead spares and no reachable partner: Open fails after the one fresh dial.
