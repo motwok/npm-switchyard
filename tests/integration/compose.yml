@@ -66,7 +66,7 @@ services:
     image: alpine:3.22
     command: ["sleep", "infinity"]
     dns: [172.28.0.2]
-    networks: [imp]
+    networks: [imp, link] # link: reads b's metrics
     depends_on:
       a:
         condition: service_healthy
