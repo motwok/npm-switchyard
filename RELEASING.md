@@ -24,7 +24,7 @@ for that Windows version any more.
 | Workflow | File | Trigger | What it does |
 |---|---|---|---|
 | **Build** | `build.yml` | PR to `master`, push to `master`, manual | Builds all variants and runs the tests. On a push to `master` that changed the image, or when started by hand, it publishes the release `vX.Y.Z` and pushes `:X.Y.Z` and `:latest` as one manifest list (Windows entries with `os.version`). |
-| **Release Drafter** | `release-drafter.yml` | PR events; push to `master` only when Go code, `go.mod`/`go.sum` or a Dockerfile changed | Labels pull requests from their Conventional Commit titles and keeps the release notes of the next version up to date. |
+| **Release Drafter** | `release-drafter.yml` | PR events | Labels pull requests from their Conventional Commit titles. The release notes are written by the release job in **Build**, only when there is a release. |
 | **Dependabot** | `.github/dependabot.yml` | Dependabot schedule | Opens PRs for dependencies and the GitHub Actions used; they are merged automatically once the build is green. |
 
 ## Release flow
@@ -33,8 +33,8 @@ for that Windows version any more.
 flowchart LR
   O[maintainer merges a PR] --> M[master]
   D[Dependabot PR, auto-merged when green] --> M
-  M --> C{image-relevant files<br/>changed since last release?}
-  C -- "no (docs, CI)" --> Q[no release,<br/>listed in the next one]
+  M --> C{image-relevant files<br/>changed since last release?<br/>tests excluded}
+  C -- "no (docs, CI, tests)" --> Q[no release,<br/>listed in the next one]
   C -- yes --> B[Build workflow<br/>all variants]
   B --> T{smoke test:<br/>image starts,<br/>/metrics answers}
   T -- ok --> R[publish release vX.Y.Z]

@@ -191,7 +191,7 @@ jobs:
         run: |
           last=$(git describe --tags --abbrev=0 2>/dev/null || true)
           if [ "${{ github.event_name }}" = workflow_dispatch ]; then echo "release=true" >> "$GITHUB_OUTPUT"; exit 0; fi
-          if [ -z "$last" ] || ! git diff --quiet "$last" HEAD -- '*.go' go.mod go.sum Dockerfile Dockerfile.windows; then
+          if [ -z "$last" ] || ! git diff --quiet "$last" HEAD -- '*.go' ':(exclude)*_test.go' go.mod go.sum Dockerfile Dockerfile.windows; then
             echo "release=true" >> "$GITHUB_OUTPUT"
           else
             echo "release=false" >> "$GITHUB_OUTPUT"
