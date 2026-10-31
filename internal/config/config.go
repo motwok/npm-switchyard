@@ -22,11 +22,12 @@ const (
 )
 
 type Partner struct {
-	Name       string `yaml:"name"`
-	Address    string `yaml:"address"`
-	PublicKey  string `yaml:"public_key"`
-	PrivateKey string `yaml:"private_key"` // overrides the global key for this partner
-	Spares     *int   `yaml:"spares"`
+	Name       string   `yaml:"name"`
+	Address    string   `yaml:"address"`
+	PublicKey  string   `yaml:"public_key"`
+	PrivateKey string   `yaml:"private_key"` // overrides the global key for this partner
+	Spares     *int     `yaml:"spares"`
+	Networks   Networks `yaml:"networks"`
 
 	Own  ed25519.PrivateKey `yaml:"-"` // own key towards this partner
 	Peer ed25519.PublicKey  `yaml:"-"`
@@ -46,6 +47,7 @@ type Config struct {
 	NPMData       string    `yaml:"npm_data"`
 	LogLevel      string    `yaml:"log_level"`
 	PrivateKey    string    `yaml:"private_key"`
+	LocalNetworks Networks  `yaml:"local_networks"`
 	Partners      []Partner `yaml:"partners"`
 
 	Key ed25519.PrivateKey `yaml:"-"`
@@ -111,6 +113,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("private_key: %w", err)
 	}
 	c.Key = key
+	if err := c.LocalNetworks.validate(); err != nil {
+		return fmt.Errorf("local_networks: %w", err)
+	}
 	names := map[string]bool{}
 	peers := map[string]string{}
 	for i := range c.Partners {
@@ -135,6 +140,9 @@ func (c *Config) validate() error {
 			if p.Own, err = ParsePrivateKey(p.PrivateKey); err != nil {
 				return fmt.Errorf("partner %q: private_key: %w", p.Name, err)
 			}
+		}
+		if err := p.Networks.validate(); err != nil {
+			return fmt.Errorf("partner %q: networks: %w", p.Name, err)
 		}
 		if p.Spares != nil && *p.Spares < 0 {
 			return fmt.Errorf("partner %q: spares < 0", p.Name)

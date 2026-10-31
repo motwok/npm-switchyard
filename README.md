@@ -210,6 +210,9 @@ over `-config`: the health check reads the configuration the same way and does n
 | `partners[].public_key` | | the partner's public key |
 | `partners[].private_key` | `private_key` | own key for this partner only |
 | `partners[].spares` | `2` | idle authenticated connections kept ready by the dialing side |
+| `partners[].networks.include` | all | networks whose containers this partner may reach (`*` wildcard) |
+| `partners[].networks.exclude` | none | networks this partner may not reach; wins over `include` |
+| `local_networks.include` / `.exclude` | all / none | the same for `local` names |
 
 ## Monitoring
 
@@ -233,9 +236,9 @@ side, once its DNS server listens. A disconnected partner does not make it unhea
 
 - Partner connections use mutual TLS 1.3; each side accepts the other only with the public key
   configured for it, as WireGuard does. The key exchange is hybrid post-quantum (X25519 with ML-KEM).
-- Only containers that share a network with the exporting agent are reachable, connected by their
-  address from the Docker API, never by a name resolved via DNS. The import network is never exported,
-  and imported names are never exported again.
+- Only containers that share a network with the exporting agent are reachable, narrowed per partner by
+  `networks.include` / `exclude`, connected by their address from the Docker API, never by a name
+  resolved via DNS. The import network is never exported, and imported names are never exported again.
 - The agent only reads the Docker API. See [SECURITY.md](SECURITY.md).
 
 ## Support Me

@@ -18,8 +18,8 @@ import (
 // echoExporter connects every target named "echo" to a local echo server.
 type echoExporter struct{ addr string }
 
-func (e echoExporter) Connect(ctx context.Context, t wire.Target) (net.Conn, metrics.Target, byte) {
-	if t.Name != "echo" {
+func (e echoExporter) Connect(ctx context.Context, t wire.Target, allow func(string) bool) (net.Conn, metrics.Target, byte) {
+	if t.Name != "echo" || !allow("echonet") {
 		return nil, metrics.Target{}, wire.StatusNoTarget
 	}
 	c, err := net.Dial("tcp", e.addr)
@@ -51,13 +51,19 @@ func echoServer(t *testing.T) string {
 
 func pair(t *testing.T, aDials, bDials bool) (*Manager, *Manager) {
 	t.Helper()
+	return pairWith(t, aDials, bDials, config.Networks{})
+}
+
+// pairWith sets the networks b exports to a.
+func pairWith(t *testing.T, aDials, bDials bool, bNets config.Networks) (*Manager, *Manager) {
+	t.Helper()
 	ka := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))
 	kb := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{8}, 32))
 	la, _ := net.Listen("tcp", "127.0.0.1:0")
 	lb, _ := net.Listen("tcp", "127.0.0.1:0")
 	t.Cleanup(func() { la.Close(); lb.Close() })
 	pa := config.Partner{Name: "b", Own: ka, Peer: kb.Public().(ed25519.PublicKey)}
-	pb := config.Partner{Name: "a", Own: kb, Peer: ka.Public().(ed25519.PublicKey)}
+	pb := config.Partner{Name: "a", Own: kb, Peer: ka.Public().(ed25519.PublicKey), Networks: bNets}
 	if aDials {
 		pa.Address = lb.Addr().String()
 	}
@@ -110,6 +116,19 @@ func TestStreamsBothDirections(t *testing.T) {
 func TestRefused(t *testing.T) {
 	a, _ := pair(t, true, false)
 	c, st, err := a.Open(context.Background(), 0, wire.Target{Proto: wire.TCP, Port: 1, Name: "nope"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	if st != wire.StatusNoTarget {
+		t.Fatalf("status %d", st)
+	}
+}
+
+// A network excluded for the partner is not reachable for it.
+func TestNetworkExcluded(t *testing.T) {
+	a, _ := pairWith(t, true, false, config.Networks{Exclude: []string{"echo*"}})
+	c, st, err := a.Open(context.Background(), 0, wire.Target{Proto: wire.TCP, Port: 1, Name: "echo"})
 	if err != nil {
 		t.Fatal(err)
 	}
