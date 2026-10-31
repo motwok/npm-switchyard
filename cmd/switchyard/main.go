@@ -30,6 +30,12 @@ import (
 
 var version = "dev"
 
+// Replaceable in tests.
+var (
+	newLocal = wire.NewLocal
+	listen   = net.Listen
+)
+
 // startTimeout bounds the Docker calls at start.
 var startTimeout = 30 * time.Second
 
@@ -166,7 +172,7 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, dc *docker
 	for _, p := range cfg.Partners {
 		wp = append(wp, wire.Partner{Own: p.Own, Peer: p.Peer})
 	}
-	local, err := wire.NewLocal(cfg.Key, wp)
+	local, err := newLocal(cfg.Key, wp)
 	if err != nil {
 		log.Error("tls", "err", err)
 		return 1
@@ -174,7 +180,7 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, dc *docker
 	mgr := peer.New(local, cfg.Partners, exp, met, log)
 	var pls []net.Listener
 	for _, ip := range ownIPs {
-		l, err := net.Listen("tcp", net.JoinHostPort(ip, strconv.Itoa(cfg.Listen)))
+		l, err := listen("tcp", net.JoinHostPort(ip, strconv.Itoa(cfg.Listen)))
 		if err != nil {
 			log.Error("listen", "addr", ip, "err", err)
 			return 1
@@ -204,7 +210,7 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, dc *docker
 	}
 	srv := &http.Server{Handler: metricsHandler(met), ReadHeaderTimeout: 10 * time.Second}
 	for _, ip := range append(ownIPs, "127.0.0.1") {
-		l, err := net.Listen("tcp", net.JoinHostPort(ip, strconv.Itoa(cfg.Metrics)))
+		l, err := listen("tcp", net.JoinHostPort(ip, strconv.Itoa(cfg.Metrics)))
 		if err != nil {
 			log.Error("listen metrics", "addr", ip, "err", err)
 			return 1

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -78,6 +79,8 @@ func pairWith(t *testing.T, aDials, bDials bool, bNets config.Networks) (*Manage
 	b := New(loB, []config.Partner{pb}, exp, metrics.New(), log)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	cancels.Store(a, cancel)
+	cancels.Store(b, cancel)
 	a.Run(ctx, []net.Listener{la})
 	b.Run(ctx, []net.Listener{lb})
 	deadline := time.Now().Add(10 * time.Second)
@@ -155,4 +158,13 @@ func TestBothDial(t *testing.T) {
 	}
 	roundTrip(t, a)
 	roundTrip(t, b)
+}
+
+// cancels holds the context cancel of each manager made by pairWith.
+var cancels sync.Map
+
+func (m *Manager) cancel() {
+	if c, ok := cancels.Load(m); ok {
+		c.(context.CancelFunc)()
+	}
 }

@@ -540,3 +540,118 @@ func TestNPMPollAndStop(t *testing.T) {
 	cancel() // closes the inotify descriptor: the read loop ends
 	<-done
 }
+
+// funcOpener answers every open with f.
+type funcOpener func() (net.Conn, byte, error)
+
+func (funcOpener) Known(string) bool { return true }
+func (f funcOpener) Open(context.Context, string, wire.Target) (net.Conn, byte, error) {
+	return f()
+}
+
+// udpTo answers a local UDP name and sends one datagram to it.
+func udpTo(t *testing.T, im *Importer) netip.AddrPort {
+	t.Helper()
+	port := freePort(t)
+	query(im, "web."+strconv.Itoa(port)+".local.switchyard", dns.TypeA)
+	u, err := net.Dial("udp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { u.Close() })
+	_, _ = u.Write([]byte("x"))
+	return netip.AddrPortFrom(im.Own, uint16(port))
+}
+
+func TestUDPRefusedWithConn(t *testing.T) {
+	im := newImporter(t)
+	closed := make(chan struct{})
+	a, b := net.Pipe()
+	defer b.Close()
+	im.open = funcOpener(func() (net.Conn, byte, error) {
+		go func() { _, _ = b.Read(make([]byte, 1)); close(closed) }()
+		return a, wire.StatusNoTarget, nil
+	})
+	udpTo(t, im)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refused stream not closed")
+	}
+}
+
+func TestUDPReplyAfterListenerClosed(t *testing.T) {
+	im := newImporter(t)
+	a, b := net.Pipe()
+	defer b.Close()
+	im.open = funcOpener(func() (net.Conn, byte, error) { return a, wire.StatusOK, nil })
+	ap := udpTo(t, im)
+	_ = b.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := b.Read(make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	im.mu.Lock()
+	im.closeListener(ap)
+	im.mu.Unlock()
+	_, _ = b.Write([]byte("y")) // the reply cannot be sent: the flow ends
+	if _, err := b.Read(make([]byte, 1)); err == nil {
+		t.Fatal("flow not closed")
+	}
+}
+
+func TestUDPWriteFails(t *testing.T) {
+	im := newImporter(t)
+	sent := make(chan struct{})
+	im.open = funcOpener(func() (net.Conn, byte, error) {
+		a, b := net.Pipe()
+		b.Close()
+		close(sent)
+		return a, wire.StatusOK, nil
+	})
+	udpTo(t, im)
+	select {
+	case <-sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no open")
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestJoinedWithoutAddress(t *testing.T) {
+	f := dockertest.NewFake()
+	defer f.Close()
+	im := newImporter(t)
+	im.dc, im.network = f.Client(), "imp"
+	f.Set(dockertest.Ctr("noip", "noip", nil, map[string]docker.Endpoint{"imp": {NetworkID: "n-imp"}}))
+	free := im.table.Free()
+	im.joined(context.Background(), "noip")
+	if im.table.Free() != free {
+		t.Fatal("address taken without an IP")
+	}
+}
+
+func TestWatchNPMLateStreamDir(t *testing.T) {
+	im := newImporter(t)
+	im.tune.npmPoll = 20 * time.Millisecond
+	dir := t.TempDir()
+	im.npm = npmconf.NewStore(dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { im.watchNPM(ctx); close(done) }()
+	_ = os.MkdirAll(filepath.Join(dir, "nginx", "proxy_host"), 0o755)
+	time.Sleep(200 * time.Millisecond) // proxy_host is watched, stream not yet
+	st := filepath.Join(dir, "nginx", "stream")
+	_ = os.MkdirAll(st, 0o755)
+	port := freePort(t)
+	conf := "set $server \"web.b.switchyard\";\nset $port " + strconv.Itoa(port) + ";\n"
+	deadline := time.Now().Add(10 * time.Second)
+	for im.npm.Ports("web.b.switchyard") == nil {
+		_ = os.WriteFile(filepath.Join(st, "1.conf"), []byte(conf), 0o644)
+		if time.Now().After(deadline) {
+			t.Fatal("stream file not picked up")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	<-done
+}
