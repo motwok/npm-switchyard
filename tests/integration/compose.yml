@@ -17,9 +17,10 @@ services:
     environment:
       SWITCHYARD_CONFIG: |
         log_level: debug
+        private_key: "LLS0gQNA3cdq5h3gg1g/pqIrqUdEdkGu7dJIDQehz10="
         partners:
           - name: a
-            psk: "dGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXk="
+            public_key: "RINyVq7yQFyJwxKem6pabaa/HaYF2tYO1KSiaZJS5b0="
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [link, tgt]
@@ -31,10 +32,11 @@ services:
       SWITCHYARD_CONFIG: |
         log_level: debug
         import_network: sy-it_imp
+        private_key: "9Ktfb/WqyMKethZfu/jDpSVsAgFgwA7LGmggx6scHrk="
         partners:
           - name: b
             address: b:9481
-            psk: "dGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXk="
+            public_key: "XRX+eTqjLBXPs4Sob4ad2h6/ltChA+LOshAdgGTPbIg="
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:

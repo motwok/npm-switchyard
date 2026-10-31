@@ -93,7 +93,7 @@ jobs:
         run: |
           docker run -d --name sy --isolation process \
             --mount 'type=npipe,src=\\.\pipe\docker_engine,dst=\\.\pipe\docker_engine' \
-            -e SWITCHYARD_CONFIG='log_level: debug' switchyard:test
+            -e SWITCHYARD_CONFIG='{log_level: debug, private_key: "LLS0gQNA3cdq5h3gg1g/pqIrqUdEdkGu7dJIDQehz10="}' switchyard:test
           for i in $(seq 1 30); do
             if docker exec sy 'C:\switchyard.exe' health; then docker logs sy; exit 0; fi
             sleep 2

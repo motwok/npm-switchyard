@@ -52,14 +52,19 @@ flowchart LR
 
 ## Setup
 
-### 1. A pre-shared key per partner pair
+### 1. A key pair per agent
+
+As with WireGuard, each agent has a private key and gives its public key to its partners:
 
 ```sh
-openssl rand -base64 32
+docker run --rm ghcr.io/motwok/npm-switchyard genkey > private.key
+docker run --rm -i ghcr.io/motwok/npm-switchyard pubkey < private.key
 ```
 
-Enter the same key on both sides. The key identifies the partner; the partner name is only a local
-label and may differ on both sides.
+The private key goes into the agent's own `private_key`; the public key goes into the partner's entry
+for this agent (`public_key`). The public key identifies the partner; the partner name is only a local
+label and may differ on both sides. An agent may use a different own key for a single partner
+(`partners[].private_key`). The agent logs its public key at start.
 
 ### 2. Exporting host
 
@@ -74,9 +79,10 @@ services:
     restart: unless-stopped
     environment:
       SWITCHYARD_CONFIG: |
+        private_key: ${SY_PRIVATE_KEY}
         partners:
           - name: hosta
-            psk: ${HOSTA_PSK}
+            public_key: <public key of hosta>
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports: ["9481:9481"]   # only on the side the partner dials
@@ -105,10 +111,11 @@ services:
     environment:
       SWITCHYARD_CONFIG: |
         import_network: switchyard
+        private_key: ${SY_PRIVATE_KEY}
         partners:
           - name: hostb
             address: hostb.example.org:9481
-            psk: ${HOSTB_PSK}
+            public_key: <public key of hostb>
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - npm_data:/npm:ro          # only for short names
@@ -158,10 +165,11 @@ services:
     restart: unless-stopped
     environment:
       SWITCHYARD_CONFIG: |
+        private_key: ${SY_PRIVATE_KEY}
         partners:
           - name: hosta
             address: hosta.example.org:9481
-            psk: ${HOSTA_PSK}
+            public_key: <public key of hosta>
     volumes:
       - type: npipe
         source: \\.\pipe\docker_engine
@@ -182,9 +190,11 @@ over `-config`: the health check reads the configuration the same way and does n
 | `metrics` | `9480` | port for `/metrics` |
 | `npm_data` | `/npm` | Nginx Proxy Manager's `/data`, mounted read-only, for short names |
 | `log_level` | `info` | `debug`, `info`, `warn`, `error` |
+| `private_key` | | own private key from `genkey` |
 | `partners[].name` | | local label of the partner, a DNS label |
 | `partners[].address` | none | `host:port` to dial; without it the agent waits |
-| `partners[].psk` | | base64 key, at least 32 bytes |
+| `partners[].public_key` | | the partner's public key |
+| `partners[].private_key` | `private_key` | own key for this partner only |
 | `partners[].spares` | `2` | idle authenticated connections kept ready by the dialing side |
 
 ## Monitoring
@@ -207,7 +217,8 @@ side, once its DNS server listens. A disconnected partner does not make it unhea
 
 ## Security
 
-- Partner connections use TLS; both sides prove the pre-shared key, bound to the TLS session.
+- Partner connections use mutual TLS 1.3; each side accepts the other only with the public key
+  configured for it, as WireGuard does. The key exchange is hybrid post-quantum (X25519 with ML-KEM).
 - Only containers that share a network with the exporting agent are reachable, connected by their
   address from the Docker API, never by a name resolved via DNS. The import network is never exported,
   and imported names are never exported again.
