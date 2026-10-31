@@ -2,12 +2,18 @@ package peer
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/tls"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/motwok/npm-switchyard/internal/config"
+	"github.com/motwok/npm-switchyard/internal/metrics"
 
 	"github.com/motwok/npm-switchyard/internal/wire"
 )
@@ -213,3 +219,132 @@ func TestPipeUDPExportFaults(t *testing.T) {
 }
 
 func logDiscard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// A second channel loses against one dialed by a lower instance ID and is closed at once.
+func TestTieBreakLoser(t *testing.T) {
+	loc, err := wire.NewLocal(ed25519.NewKeyFromSeed(make([]byte, 32)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loc.ID = wire.InstanceID{1}
+	m := New(loc, []config.Partner{{Name: "b"}}, echoExporter{}, metrics.New(), logDiscard())
+	s := m.state[0]
+	p1, p2 := net.Pipe()
+	defer p2.Close()
+	s.ctrl = &wire.Conn{Conn: tls.Client(p1, &tls.Config{}), Dialer: true} // dialed by us (ID 1)
+	newer := &wire.Conn{Conn: tls.Client(p2, &tls.Config{}), PeerID: wire.InstanceID{9}}
+	m.setControl(context.Background(), s, newer) // returns at once, keeps the old channel
+	if s.ctrl.PeerID == newer.PeerID {
+		t.Fatal("loser installed")
+	}
+}
+
+// Cancelling the context ends the keepalive of a live channel.
+func TestPingStopsOnCancel(t *testing.T) {
+	old := pingEvery
+	pingEvery = time.Hour
+	a, b := pair(t, true, false)
+	pingEvery = old
+	a.cancel()
+	deadline := time.Now().Add(5 * time.Second)
+	for a.Up(0) || b.Up(0) {
+		if time.Now().After(deadline) {
+			t.Fatal("channel kept after cancel")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// After a dead spare the fresh dial works but its first write fails too.
+func TestRedialWriteFails(t *testing.T) {
+	a, _ := pair(t, true, false)
+	// Count the writes of one dial alone (no wrapper is shared), then fail the write after it.
+	probe := &countConn{}
+	a.setWrap(func(c net.Conn) net.Conn { probe.Conn = c; return probe })
+	c, err := a.dial(context.Background(), 0, wire.KindStream)
+	a.setWrap(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := probe.writes.Load()
+	c.Close()
+	a.setWrap(func(c net.Conn) net.Conn { return &countConn{Conn: c, failAt: n + 1} })
+	sp := takeSpares(t, a)
+	a.state[0].mu.Lock()
+	ch := a.state[0].spares
+	a.state[0].mu.Unlock()
+	for _, c := range sp {
+		c.Conn.NetConn().Close()
+		ch <- c
+	}
+	if _, _, err := a.Open(context.Background(), 0, wire.Target{Proto: wire.TCP, Port: 1, Name: "echo"}); err == nil {
+		t.Fatal("open succeeded although every write failed")
+	}
+}
+
+type countConn struct {
+	net.Conn
+	writes atomic.Int32
+	failAt int32
+}
+
+func (c *countConn) Write(b []byte) (int, error) {
+	if n := c.writes.Add(1); c.failAt > 0 && n >= c.failAt {
+		return 0, errors.New("write fails")
+	}
+	return c.Conn.Write(b)
+}
+
+// The target answers but the datagram cannot be framed back to the partner.
+func TestPipeUDPExportReplyFails(t *testing.T) {
+	s1, s2 := net.Pipe()
+	u1, u2 := net.Pipe()
+	done := make(chan struct{})
+	go func() { PipeUDPExport(faultConn{Conn: s1, failWrite: true}, u1, func(string, int64) {}); close(done) }()
+	_, _ = u2.Write([]byte("reply"))
+	s2.Close() // ends the partner side
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pipe did not end")
+	}
+	u2.Close()
+}
+
+// setWrap sets the dial wrapper under the partner lock.
+func (m *Manager) setWrap(f func(net.Conn) net.Conn) {
+	m.state[0].mu.Lock()
+	m.wrap = f
+	m.state[0].mu.Unlock()
+}
+
+// failConn fails every write once broken is set.
+type failConn struct {
+	net.Conn
+	broken *atomic.Bool
+}
+
+func (c failConn) Write(b []byte) (int, error) {
+	if c.broken.Load() {
+		return 0, io.ErrClosedPipe
+	}
+	return c.Conn.Write(b)
+}
+
+func TestPingWriteFails(t *testing.T) {
+	var broken atomic.Bool
+	pairSetup = func(a, _ *Manager) {
+		a.pingEvery = 20 * time.Millisecond
+		a.wrap = func(c net.Conn) net.Conn { return failConn{c, &broken} }
+	}
+	a, _ := pairWith(t, true, false, config.Networks{})
+	pairSetup = nil
+	broken.Store(true) // idle control channel: the next ping is the first write
+	deadline := time.Now().Add(10 * time.Second)
+	for a.Up(0) {
+		if time.Now().After(deadline) {
+			t.Fatal("control channel survived a failed ping")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

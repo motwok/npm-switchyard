@@ -51,6 +51,10 @@ type Manager struct {
 	met      *metrics.Registry
 	log      *slog.Logger
 
+	// wrap, if set, wraps every new raw partner connection (tests inject faults with it);
+	// guarded by the partner state lock.
+	wrap func(net.Conn) net.Conn
+
 	// Copied from the package defaults at New, so tests can shorten them.
 	requestWait, statusTimeout, pingEvery, acceptRetry time.Duration
 
@@ -176,11 +180,14 @@ func (m *Manager) dial(ctx context.Context, idx int, kind byte) (*wire.Conn, err
 	d := net.Dialer{Timeout: dialTimeout}
 	s := m.state[idx]
 	s.mu.Lock()
-	addr := s.addr
+	addr, wrap := s.addr, m.wrap
 	s.mu.Unlock()
 	raw, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
+	}
+	if wrap != nil {
+		raw = wrap(raw)
 	}
 	c, err := m.local.Dial(raw, idx, kind)
 	if err != nil {

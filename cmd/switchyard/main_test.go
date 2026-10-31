@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"io"
@@ -344,5 +345,53 @@ func TestMainProcess(t *testing.T) {
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) || ee.ExitCode() != 2 {
 		t.Fatalf("exit: %v", err)
+	}
+}
+
+func TestServeTLSError(t *testing.T) {
+	f := dockertest.NewFake()
+	defer f.Close()
+	f.Set(dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{"apps": {NetworkID: "n1", IPAddress: "127.0.0.2"}}))
+	old := newLocal
+	defer func() { newLocal = old }()
+	newLocal = func(ed25519.PrivateKey, []wire.Partner) (*wire.Local, error) {
+		return nil, errors.New("no certificate")
+	}
+	cfg, _ := config.Parse([]byte("private_key: " + key + "\n"))
+	if serve(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), f.Client(), "self") != 1 {
+		t.Fatal("certificate error ignored")
+	}
+}
+
+// The metrics listener breaks while the agent runs: the agent stops with an error.
+func TestServeMetricsBreaks(t *testing.T) {
+	f := dockertest.NewFake()
+	defer f.Close()
+	f.Set(dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{"apps": {NetworkID: "n1", IPAddress: "127.0.0.2"}}))
+	mport := freePort(t)
+	got := make(chan net.Listener, 4)
+	old := listen
+	defer func() { listen = old }()
+	listen = func(n, a string) (net.Listener, error) {
+		l, err := old(n, a)
+		if err == nil && strings.HasSuffix(a, ":"+strconv.Itoa(mport)) {
+			got <- l
+		}
+		return l, err
+	}
+	cfg, _ := config.Parse([]byte("private_key: " + key + "\nlisten: " + strconv.Itoa(freePort(t)) +
+		"\nmetrics: " + strconv.Itoa(mport) + "\n"))
+	done := make(chan int, 1)
+	go func() {
+		done <- serve(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), f.Client(), "self")
+	}()
+	(<-got).Close()
+	select {
+	case code := <-done:
+		if code != 1 {
+			t.Fatalf("exit %d", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent kept running")
 	}
 }
