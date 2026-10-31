@@ -22,25 +22,44 @@ type Fake struct {
 	Networks    map[string]docker.Network   // by ID
 	VersionAPI  string
 	EventsFail  bool            // answer the event stream with 500
-	ListFail    bool            // answer the container list with 500
 	FailInspect map[string]bool // answer inspect of these IDs with 500
+	listFail    bool            // answer the container list with 500
+	stall       bool            // never answer inspect until the request is cancelled
 	events      chan docker.Event
+}
+
+// SetStall makes inspect hang until the request is cancelled, as a stalled daemon would.
+func (f *Fake) SetStall(on bool) {
+	f.mu.Lock()
+	f.stall = on
+	f.mu.Unlock()
+}
+
+// SetListFail makes the container list answer 500.
+func (f *Fake) SetListFail(on bool) {
+	f.mu.Lock()
+	f.listFail = on
+	f.mu.Unlock()
 }
 
 func NewFake() *Fake {
 	f := &Fake{Containers: map[string]docker.Container{}, Networks: map[string]docker.Network{}, VersionAPI: "1.47",
 		events: make(chan docker.Event, 16), FailInspect: map[string]bool{}}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /"+docker.APIVersion+"/version", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(docker.Version{APIVersion: f.VersionAPI, Os: "linux"})
 	})
+	// As the daemon: a versioned path above its own API version is refused.
+	mux.HandleFunc("GET /"+docker.APIVersion+"/version", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"client version `+docker.APIVersion+` is too new"}`, http.StatusBadRequest)
+	})
 	mux.HandleFunc("GET /"+docker.APIVersion+"/containers/json", func(w http.ResponseWriter, _ *http.Request) {
-		if f.ListFail {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.listFail {
 			http.Error(w, "boom", http.StatusInternalServerError)
 			return
 		}
-		f.mu.Lock()
-		defer f.mu.Unlock()
 		var list []map[string]any
 		for _, c := range f.Containers {
 			if !c.State.Running {
@@ -59,6 +78,12 @@ func NewFake() *Fake {
 	mux.HandleFunc("GET /"+docker.APIVersion+"/containers/{id}/json", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.stall {
+			f.mu.Unlock()
+			<-r.Context().Done()
+			f.mu.Lock()
+			return
+		}
 		id := r.PathValue("id")
 		if f.FailInspect[id] {
 			http.Error(w, "boom", http.StatusInternalServerError)

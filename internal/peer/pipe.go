@@ -15,8 +15,26 @@ var UDPIdle = 60 * time.Second
 
 type closeWriter interface{ CloseWrite() error }
 
+// netConner exposes the socket under a TLS or wrapping connection.
+type netConner interface{ NetConn() net.Conn }
+
+// reset makes the next Close of c a TCP reset instead of an orderly close (TRN-2).
+func reset(c net.Conn) {
+	for {
+		switch x := c.(type) {
+		case *net.TCPConn:
+			_ = x.SetLinger(0)
+			return
+		case netConner:
+			c = x.NetConn()
+		default:
+			return
+		}
+	}
+}
+
 // Pipe copies both ways with half-close (TRN-2). count gets "in" for bytes towards a and
-// "out" for bytes towards b.
+// "out" for bytes towards b. An error on one side, such as a reset, resets the other.
 func Pipe(a, b net.Conn, count func(dir string, n int64)) {
 	var wg sync.WaitGroup
 	cp := func(dst, src net.Conn, dir string) {
@@ -24,6 +42,8 @@ func Pipe(a, b net.Conn, count func(dir string, n int64)) {
 		n, err := io.Copy(dst, src)
 		count(dir, n)
 		if err != nil {
+			reset(a)
+			reset(b)
 			a.Close()
 			b.Close()
 			return

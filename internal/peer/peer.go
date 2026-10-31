@@ -133,7 +133,7 @@ func (m *Manager) acceptLoop(ctx context.Context, l net.Listener) {
 func (m *Manager) handleIncoming(ctx context.Context, raw net.Conn) {
 	c, err := m.local.Accept(raw)
 	if err != nil {
-		m.log.Warn("partner handshake failed", "remote", raw.RemoteAddr(), "err", err)
+		m.logHandshakeFailed(raw.RemoteAddr(), err)
 		raw.Close()
 		return
 	}
@@ -162,7 +162,7 @@ func (m *Manager) dialLoop(ctx context.Context, idx int) {
 		}
 		c, err := m.dial(ctx, idx, wire.KindControl)
 		if err != nil {
-			m.log.Warn("partner dial failed", "peer", p.Name, "err", err)
+			m.logDialFailed(p.Name, err)
 			select {
 			case <-ctx.Done():
 				return
@@ -174,6 +174,25 @@ func (m *Manager) dialLoop(ctx context.Context, idx int) {
 		wait = backoffMin
 		m.setControl(ctx, s, c)
 	}
+}
+
+// Handshake failures are warnings, except a version mismatch (PAR-3) and failures after the
+// partner was identified (LOG-2), which are errors with the partner's name.
+func (m *Manager) logDialFailed(name string, err error) {
+	lvl := slog.LevelWarn
+	if errors.Is(err, wire.ErrNoVersion) {
+		lvl = slog.LevelError
+	}
+	m.log.Log(context.Background(), lvl, "partner dial failed", "peer", name, "err", err)
+}
+
+func (m *Manager) logHandshakeFailed(remote net.Addr, err error) {
+	var pe *wire.PeerError
+	if errors.As(err, &pe) {
+		m.log.Error("partner handshake failed", "peer", m.partners[pe.Partner].Name, "remote", remote, "err", err)
+		return
+	}
+	m.log.Warn("partner handshake failed", "remote", remote, "err", err)
 }
 
 func (m *Manager) dial(ctx context.Context, idx int, kind byte) (*wire.Conn, error) {
@@ -207,16 +226,18 @@ func (m *Manager) dialerID(c *wire.Conn) wire.InstanceID {
 }
 
 // setControl installs a control channel; with two channels the one dialed by the lower
-// instance ID wins (PAR-4).
+// instance ID wins (PAR-4). A new instance ID of the partner means it restarted: the old
+// channel is dead, whatever its dialer ID.
 func (m *Manager) setControl(ctx context.Context, s *partnerState, c *wire.Conn) {
 	s.mu.Lock()
 	if old := s.ctrl; old != nil {
-		if m.dialerID(old).Less(m.dialerID(c)) {
+		if old.PeerID == c.PeerID && m.dialerID(old).Less(m.dialerID(c)) {
 			s.mu.Unlock()
 			c.Close()
 			return
 		}
 		old.Close()
+		closeSpares(s)
 	}
 	s.ctrl = c
 	s.gen++
@@ -239,19 +260,25 @@ func (m *Manager) setControl(ctx context.Context, s *partnerState, c *wire.Conn)
 	if s.ctrl == c {
 		s.ctrl = nil
 		s.gen++
-		if s.spares != nil {
-			close(s.spares)
-			for sp := range s.spares {
-				sp.Close()
-			}
-			s.spares = nil
-		}
+		closeSpares(s)
 		s.mu.Unlock()
 		m.met.SetPeerUp(s.name, false)
 		m.log.Warn("partner disconnected", "peer", s.name)
 		return
 	}
 	s.mu.Unlock()
+}
+
+// closeSpares drops the spare pool with its idle connections. Caller holds s.mu.
+func closeSpares(s *partnerState) {
+	if s.spares == nil {
+		return
+	}
+	close(s.spares)
+	for sp := range s.spares {
+		sp.Close()
+	}
+	s.spares = nil
 }
 
 func (m *Manager) controlLoop(ctx context.Context, s *partnerState, c *wire.Conn) {
@@ -392,11 +419,7 @@ func (m *Manager) Open(ctx context.Context, idx int, t wire.Target) (net.Conn, b
 	id := s.nextID
 	s.pending[id] = ch
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.pending, id)
-		s.mu.Unlock()
-	}()
+	defer s.forget(id, ch)
 	if err := m.writeCtrl(s, ctrl, wire.MsgRequest, wire.MarshalRequest(id, t)); err != nil {
 		return nil, 0, err
 	}
@@ -412,6 +435,18 @@ func (m *Manager) Open(ctx context.Context, idx int, t wire.Target) (net.Conn, b
 		return nil, 0, errors.New("partner did not attach")
 	case <-ctx.Done():
 		return nil, 0, ctx.Err()
+	}
+}
+
+// forget ends a request: a stream attached after the requester stopped waiting is closed.
+func (s *partnerState) forget(id uint32, ch chan *wire.Conn) {
+	s.mu.Lock()
+	delete(s.pending, id)
+	s.mu.Unlock()
+	select {
+	case c := <-ch:
+		c.Close()
+	default:
 	}
 }
 
@@ -457,16 +492,18 @@ func (m *Manager) serveStream(ctx context.Context, s *partnerState, c *wire.Conn
 			return
 		}
 		id := binary.BigEndian.Uint32(idb[:])
+		// Lookup and hand-over under the lock, so forget sees the stream or it is closed here.
 		s.mu.Lock()
-		ch := s.pending[id]
-		s.mu.Unlock()
-		if ch == nil {
-			c.Close()
-			return
+		delivered := false
+		if ch := s.pending[id]; ch != nil {
+			select {
+			case ch <- c:
+				delivered = true
+			default:
+			}
 		}
-		select {
-		case ch <- c:
-		default:
+		s.mu.Unlock()
+		if !delivered {
 			c.Close()
 		}
 	default:

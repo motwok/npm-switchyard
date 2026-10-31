@@ -31,7 +31,11 @@ func NewWithDialer(d func(ctx context.Context) (net.Conn, error)) *Client {
 }
 
 func (c *Client) get(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/"+APIVersion+path, nil)
+	return c.getRaw(ctx, "/"+APIVersion+path, out)
+}
+
+func (c *Client) getRaw(ctx context.Context, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+path, nil)
 	if err != nil {
 		return err
 	}
@@ -64,9 +68,11 @@ type Version struct {
 	Os         string `json:"Os"`
 }
 
+// Version asks without an API version in the path: a daemon too old for APIVersion would
+// refuse the versioned request before answering.
 func (c *Client) Version(ctx context.Context) (Version, error) {
 	var v Version
-	err := c.get(ctx, "/version", &v)
+	err := c.getRaw(ctx, "/version", &v)
 	return v, err
 }
 

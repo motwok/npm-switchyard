@@ -51,8 +51,14 @@ func TestVersionMismatch(t *testing.T) {
 	la, _ := NewLocal(a, []Partner{{Own: a, Peer: pub(b)}})
 	lb, _ := NewLocal(b, []Partner{{Own: b, Peer: pub(a)}})
 	lb.verMin, lb.verMax = 2, 2
-	if _, err, r := handshake(t, la, 0, lb); err == nil || r.err == nil {
+	_, err, r := handshake(t, la, 0, lb)
+	if err == nil || r.err == nil {
 		t.Fatalf("both sides must refuse: %v / %v", err, r.err)
+	}
+	// The listener knows the partner by then: the error names it and keeps the cause.
+	var pe *PeerError
+	if !errors.As(r.err, &pe) || pe.Partner != 0 || !errors.Is(r.err, ErrNoVersion) || pe.Error() == "" {
+		t.Fatalf("listener error: %v", r.err)
 	}
 }
 

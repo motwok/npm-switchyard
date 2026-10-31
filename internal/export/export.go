@@ -17,9 +17,8 @@ import (
 	"github.com/motwok/npm-switchyard/internal/wire"
 )
 
-const (
-	connectTimeout = 10 * time.Second
-)
+// connectTimeout bounds the Docker re-check and the dial of a target; a variable for tests.
+var connectTimeout = 10 * time.Second
 
 type ref struct {
 	containerID string
@@ -135,7 +134,8 @@ func (e *Exporter) Refresh(ctx context.Context) error {
 	return nil
 }
 
-// dnsNames is the endpoint's DNSNames; older daemons without it fall back to name and aliases.
+// dnsNames is the endpoint's DNSNames. Docker's default bridge network has none; there the
+// container name, its aliases and the short ID count (decided 2026-10-31).
 func dnsNames(c docker.Container, _ string, ep docker.Endpoint) []string {
 	if len(ep.DNSNames) > 0 {
 		return ep.DNSNames
@@ -147,21 +147,22 @@ func dnsNames(c docker.Container, _ string, ep docker.Endpoint) []string {
 	return out
 }
 
-// Run keeps the table current from Docker events (EXP-5, EXP-6).
+// Run keeps the table current from Docker events (EXP-5, EXP-6). Refreshes run in their own
+// goroutine and are repeated with backoff until one succeeds, so a failed Docker call does not
+// leave the table stale until the next event.
 func (e *Exporter) Run(ctx context.Context) {
+	kick := make(chan struct{}, 1)
+	ask := func() { nudge(kick) }
+	go e.refresher(ctx, kick)
 	wait := e.backoffMin
 	for ctx.Err() == nil {
-		if err := e.Refresh(ctx); err != nil {
-			e.log.Warn("docker refresh", "err", err)
-		}
+		ask()
 		start := time.Now()
 		err := e.dc.Events(ctx, func(ev docker.Event) {
 			switch ev.Type + "/" + ev.Action {
 			case "container/start", "container/die", "container/destroy",
 				"network/connect", "network/disconnect", "network/destroy":
-				if err := e.Refresh(ctx); err != nil {
-					e.log.Warn("docker refresh", "err", err)
-				}
+				ask()
 			}
 		})
 		if ctx.Err() != nil {
@@ -180,6 +181,39 @@ func (e *Exporter) Run(ctx context.Context) {
 	}
 }
 
+// nudge asks for a refresh; one pending request covers any number of events.
+func nudge(kick chan<- struct{}) {
+	select {
+	case kick <- struct{}{}:
+	default:
+	}
+}
+
+// refresher rebuilds the table on every kick, retrying with backoff while Docker fails.
+func (e *Exporter) refresher(ctx context.Context, kick <-chan struct{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-kick:
+		}
+		wait := e.backoffMin
+		for ctx.Err() == nil {
+			err := e.Refresh(ctx)
+			if err == nil {
+				break
+			}
+			e.log.Warn("docker refresh", "err", err, "retry", wait)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+			wait = min(wait*2, e.backoffMax)
+		}
+	}
+}
+
 // Connect implements peer.Exporter (EXP-1..4); allow limits the networks for this partner.
 func (e *Exporter) Connect(ctx context.Context, t wire.Target, allow func(network string) bool) (net.Conn, metrics.Target, byte) {
 	e.mu.Lock()
@@ -194,7 +228,9 @@ func (e *Exporter) Connect(ctx context.Context, t wire.Target, allow func(networ
 		return nil, metrics.Target{}, wire.StatusNoTarget
 	}
 	r := cands[rand.IntN(len(cands))]
-	c, err := e.dc.Inspect(ctx, r.containerID)
+	ictx, cancel := context.WithTimeout(ctx, connectTimeout) // a stalled daemon must not hold the stream
+	defer cancel()
+	c, err := e.dc.Inspect(ictx, r.containerID)
 	if err != nil || !c.State.Running || c.NetworkSettings.Networks[r.network].IPAddress != r.ip {
 		return nil, r.labels, wire.StatusNoTarget
 	}
@@ -221,6 +257,9 @@ func (c *refConn) CloseWrite() error {
 	}
 	return nil
 }
+
+// NetConn exposes the socket, so a reset can be passed on (TRN-2).
+func (c *refConn) NetConn() net.Conn { return c.Conn }
 
 // Track registers a connected target for opt-out (EXP-5); call the result when done.
 func (e *Exporter) Track(c net.Conn, _ metrics.Target) func() {
