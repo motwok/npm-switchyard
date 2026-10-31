@@ -50,3 +50,10 @@ func TestString(t *testing.T) {
 		t.Fatal("HasSuffix")
 	}
 }
+
+func TestShortString(t *testing.T) {
+	n, _ := Parse("App.HostB.switchyard")
+	if !n.Short() || n.String() != "app.hostb.switchyard" {
+		t.Fatal(n.String())
+	}
+}

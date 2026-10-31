@@ -3,6 +3,9 @@
 set -eu
 cd "$(dirname "$0")"
 export IMAGE="${IMAGE:?set IMAGE}"
+# Coverage of the instrumented image (COVER=1) lands here.
+export COVERDIR="${COVERDIR:-$(mktemp -d)}"
+mkdir -p "$COVERDIR" && chmod 777 "$COVERDIR"
 dc() { docker compose -f compose.yml "$@"; }
 fail() { echo "FAIL: $*"; dc logs a b; dc down -v >/dev/null 2>&1; exit 1; }
 cli() { dc exec -T client "$@"; }
@@ -60,4 +63,5 @@ sleep 1
 if cli curl -fsS --max-time 10 http://web.80.b.switchyard/ >/dev/null 2>&1; then fail "opt-out"; fi
 
 dc down -v >/dev/null
+chmod -R a+rX "$COVERDIR" 2>/dev/null || true  # files belong to root; Go writes them readable
 echo PASS

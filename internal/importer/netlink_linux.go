@@ -11,18 +11,26 @@ import (
 	"unsafe"
 )
 
+// Syscalls, replaceable in tests.
+var (
+	sysSocket   = syscall.Socket
+	sysBind     = syscall.Bind
+	sysSendto   = syscall.Sendto
+	sysRecvfrom = syscall.Recvfrom
+)
+
 // addAlias adds ip/bits to the interface with RTM_NEWADDR (IMP-5).
 func addAlias(ifIndex int, ip net.IP, bits int) error {
 	ip4 := ip.To4()
 	if ip4 == nil {
 		return errors.New("only IPv4 aliases")
 	}
-	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
+	fd, err := sysSocket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
 	if err != nil {
 		return err
 	}
 	defer syscall.Close(fd)
-	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+	if err := sysBind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		return err
 	}
 
@@ -48,11 +56,11 @@ func addAlias(ifIndex int, ip net.IP, bits int) error {
 	binary.NativeEndian.PutUint16(msg[6:], syscall.NLM_F_REQUEST|syscall.NLM_F_ACK|syscall.NLM_F_CREATE|syscall.NLM_F_EXCL)
 	binary.NativeEndian.PutUint32(msg[8:], 1)
 
-	if err := syscall.Sendto(fd, msg, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+	if err := sysSendto(fd, msg, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		return err
 	}
 	buf := make([]byte, 4096)
-	n, _, err := syscall.Recvfrom(fd, buf, 0)
+	n, _, err := sysRecvfrom(fd, buf, 0)
 	if err != nil {
 		return err
 	}

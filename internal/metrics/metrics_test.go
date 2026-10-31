@@ -39,3 +39,13 @@ func TestWrite(t *testing.T) {
 		t.Fatal("ended stream still active")
 	}
 }
+
+func TestEmptyLabels(t *testing.T) {
+	r := New()
+	r.SetPeerUp("", false)
+	var b strings.Builder
+	_ = r.Write(&b)
+	if !strings.Contains(b.String(), "switchyard_peer_up 0") {
+		t.Fatal(b.String())
+	}
+}

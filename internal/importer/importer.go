@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +29,19 @@ const (
 	ttlNegative = 5
 )
 
+// tuning holds timers and hooks per importer, so tests can change them without races.
+type tuning struct {
+	expireEvery            time.Duration // release of quarantined short names
+	npmPoll                time.Duration // retry for NPM directories that do not exist yet
+	backoffMin, backoffMax time.Duration // event stream reconnect
+	inotifyInit            func(int) (int, error)
+}
+
+func defaultTuning() tuning {
+	return tuning{expireEvery: time.Minute, npmPoll: 5 * time.Second, backoffMin: time.Second,
+		backoffMax: time.Minute, inotifyInit: inotifyInit1}
+}
+
 // Importer is the import side on Linux.
 type Importer struct {
 	log    *slog.Logger
@@ -42,6 +54,8 @@ type Importer struct {
 	Own     netip.Addr
 	bits    int
 	ifIndex int
+
+	tune tuning
 
 	dc        *docker.Client
 	networkID string
@@ -109,10 +123,7 @@ func Setup(ctx context.Context, dc *docker.Client, selfID string, cfg *config.Co
 			exclude = append(exclude, p.Addr())
 		}
 	}
-	pool, err := NewPool(subnet, ipRange, exclude)
-	if err != nil {
-		return nil, err
-	}
+	pool, _ := NewPool(subnet, ipRange, exclude) // cannot fail: the subnet is IPv4, checked above
 	idx, err := ifaceFor(own)
 	if err != nil {
 		return nil, err
@@ -127,6 +138,7 @@ func Setup(ctx context.Context, dc *docker.Client, selfID string, cfg *config.Co
 		table:     NewTable(pool, own, []int{53, cfg.Listen, cfg.Metrics}),
 		listeners: map[netip.AddrPort]*listenerPair{},
 		ownNet:    map[string]bool{},
+		tune:      defaultTuning(),
 		dc:        dc,
 		networkID: ep.NetworkID,
 		network:   cfg.ImportNetwork,
@@ -172,8 +184,11 @@ func (im *Importer) fillOwnNames(ctx context.Context, dc *docker.Client, self do
 	}
 }
 
+// interfaces is replaceable in tests.
+var interfaces = net.Interfaces
+
 func ifaceFor(a netip.Addr) (int, error) {
-	ifs, err := net.Interfaces()
+	ifs, err := interfaces()
 	if err != nil {
 		return 0, err
 	}
@@ -226,7 +241,7 @@ func (im *Importer) Serve(ctx context.Context, ready chan<- struct{}) error {
 }
 
 func (im *Importer) expireLoop(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(im.tune.expireEvery)
 	defer t.Stop()
 	for {
 		select {
@@ -442,7 +457,7 @@ func (im *Importer) serveTCP(c net.Conn, n names.Name, port int) {
 	ctx := context.Background()
 	s, st, err := im.open.Open(ctx, n.Partner, im.target(n, port, wire.TCP))
 	if err != nil || st != wire.StatusOK {
-		if err == nil {
+		if s != nil {
 			s.Close()
 		}
 		im.reset(c)
@@ -494,7 +509,7 @@ func (im *Importer) serveUDP(u *net.UDPConn, n names.Name, port int) {
 		if f == nil {
 			s, st, err := im.open.Open(context.Background(), n.Partner, im.target(n, port, wire.UDP))
 			if err != nil || st != wire.StatusOK {
-				if err == nil {
+				if s != nil {
 					s.Close()
 				}
 				continue
@@ -560,6 +575,3 @@ func (im *Importer) writeUDP(s net.Conn, local bool, p []byte) error {
 	}
 	return wire.WriteDatagram(s, p)
 }
-
-// String helps logs.
-func (im *Importer) String() string { return im.Own.String() + "/" + strconv.Itoa(im.bits) }

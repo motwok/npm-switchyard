@@ -30,24 +30,31 @@ import (
 
 var version = "dev"
 
-func main() {
+// startTimeout bounds the Docker calls at start.
+var startTimeout = 30 * time.Second
+
+func main() { os.Exit(cli(os.Args[1:])) }
+
+// cli dispatches the command line (spec 3) and returns the exit code.
+func cli(args []string) int {
 	fs := flag.NewFlagSet("switchyard", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "configuration file")
-	if err := fs.Parse(os.Args[1:]); err != nil {
-		os.Exit(2)
+	if err := fs.Parse(args); err != nil {
+		return 2
 	}
 	switch fs.Arg(0) {
 	case "":
-		os.Exit(run(*cfgPath))
+		return run(*cfgPath)
 	case "health":
-		os.Exit(health(*cfgPath))
+		return health(*cfgPath)
 	case "genkey":
 		fmt.Println(config.GenerateKey())
+		return 0
 	case "pubkey":
-		os.Exit(pubkey())
+		return pubkey()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", fs.Arg(0))
-		os.Exit(2)
+		return 2
 	}
 }
 
@@ -116,9 +123,17 @@ func run(path string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	return serve(ctx, cfg, log, docker.New(), docker.SelfID())
+}
 
-	dc := docker.New()
-	v, err := dc.Version(ctx)
+// serve runs the agent until ctx ends.
+func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, dc *docker.Client, selfID string) int {
+	ctx, stop := context.WithCancel(ctx) // ends background work on every return
+	defer stop()
+	// A missing daemon must not hang the start (a Windows pipe dial waits otherwise).
+	sctx, scancel := context.WithTimeout(ctx, startTimeout)
+	defer scancel()
+	v, err := dc.Version(sctx)
 	if err != nil {
 		log.Error("docker api", "err", err)
 		return 1
@@ -127,8 +142,7 @@ func run(path string) int {
 		log.Error("docker api too old", "found", v.APIVersion, "need", "1.44")
 		return 1
 	}
-	selfID := docker.SelfID()
-	self, err := dc.Inspect(ctx, selfID)
+	self, err := dc.Inspect(sctx, selfID)
 	if err != nil {
 		log.Error("inspect own container", "id", selfID, "err", err)
 		return 1

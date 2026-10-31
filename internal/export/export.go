@@ -19,7 +19,6 @@ import (
 
 const (
 	connectTimeout = 10 * time.Second
-	backoffMax     = 60 * time.Second
 )
 
 type ref struct {
@@ -39,6 +38,9 @@ type Exporter struct {
 	targets map[string][]ref // lowercase name -> candidates
 	allowed map[[2]string]bool
 	streams map[*tracked]struct{}
+
+	// Event stream reconnect backoff (EXP-6); fields so tests can shorten them.
+	backoffMin, backoffMax time.Duration
 }
 
 type tracked struct {
@@ -51,6 +53,7 @@ func New(dc *docker.Client, selfID, importNetwork string, log *slog.Logger) *Exp
 	return &Exporter{
 		dc: dc, selfID: selfID, importNetwork: importNetwork, log: log,
 		targets: map[string][]ref{}, allowed: map[[2]string]bool{}, streams: map[*tracked]struct{}{},
+		backoffMin: time.Second, backoffMax: 60 * time.Second,
 	}
 }
 
@@ -146,7 +149,7 @@ func dnsNames(c docker.Container, _ string, ep docker.Endpoint) []string {
 
 // Run keeps the table current from Docker events (EXP-5, EXP-6).
 func (e *Exporter) Run(ctx context.Context) {
-	wait := time.Second
+	wait := e.backoffMin
 	for ctx.Err() == nil {
 		if err := e.Refresh(ctx); err != nil {
 			e.log.Warn("docker refresh", "err", err)
@@ -164,8 +167,8 @@ func (e *Exporter) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if time.Since(start) > backoffMax {
-			wait = time.Second
+		if time.Since(start) > e.backoffMax {
+			wait = e.backoffMin
 		}
 		e.log.Warn("docker event stream lost", "err", err, "retry", wait)
 		select {
@@ -173,7 +176,7 @@ func (e *Exporter) Run(ctx context.Context) {
 			return
 		case <-time.After(wait):
 		}
-		wait = min(wait*2, backoffMax)
+		wait = min(wait*2, e.backoffMax)
 	}
 }
 

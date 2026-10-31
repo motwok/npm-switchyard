@@ -18,14 +18,23 @@ import (
 )
 
 const (
-	pingEvery     = 10 * time.Second
-	deadAfter     = 30 * time.Second
-	backoffMin    = time.Second
-	backoffMax    = 30 * time.Second
-	requestWait   = 15 * time.Second
-	dialTimeout   = 10 * time.Second
-	statusTimeout = 15 * time.Second
+	deadAfter   = 30 * time.Second
+	backoffMin  = time.Second
+	backoffMax  = 30 * time.Second
+	dialTimeout = 10 * time.Second
 )
+
+// requestWait bounds how long a listener waits for the dialer to attach a stream.
+var requestWait = 15 * time.Second
+
+// pingEvery is the keepalive interval on the control channel (PAR-5).
+var pingEvery = 10 * time.Second
+
+// acceptRetry is the pause after a failed accept on the partner port.
+var acceptRetry = time.Second
+
+// statusTimeout bounds the wait for the exporting side's stream status.
+var statusTimeout = 15 * time.Second
 
 var ErrNotConnected = errors.New("partner not connected")
 
@@ -42,6 +51,9 @@ type Manager struct {
 	met      *metrics.Registry
 	log      *slog.Logger
 
+	// Copied from the package defaults at New, so tests can shorten them.
+	requestWait, statusTimeout, pingEvery, acceptRetry time.Duration
+
 	mu    sync.Mutex
 	state []*partnerState
 }
@@ -49,6 +61,7 @@ type Manager struct {
 type partnerState struct {
 	idx  int
 	name string
+	addr string // dial target; guarded by mu
 
 	mu      sync.Mutex
 	ctrl    *wire.Conn
@@ -60,9 +73,10 @@ type partnerState struct {
 }
 
 func New(local *wire.Local, partners []config.Partner, exp Exporter, met *metrics.Registry, log *slog.Logger) *Manager {
-	m := &Manager{local: local, partners: partners, exp: exp, met: met, log: log}
+	m := &Manager{local: local, partners: partners, exp: exp, met: met, log: log,
+		requestWait: requestWait, statusTimeout: statusTimeout, pingEvery: pingEvery, acceptRetry: acceptRetry}
 	for i, p := range partners {
-		m.state = append(m.state, &partnerState{idx: i, name: p.Name, pending: map[uint32]chan *wire.Conn{}})
+		m.state = append(m.state, &partnerState{idx: i, name: p.Name, addr: p.Address, pending: map[uint32]chan *wire.Conn{}})
 		met.SetPeerUp(p.Name, false)
 	}
 	return m
@@ -105,7 +119,7 @@ func (m *Manager) acceptLoop(ctx context.Context, l net.Listener) {
 				return
 			}
 			m.log.Warn("accept", "err", err)
-			time.Sleep(time.Second)
+			time.Sleep(m.acceptRetry)
 			continue
 		}
 		go m.handleIncoming(ctx, raw)
@@ -160,7 +174,11 @@ func (m *Manager) dialLoop(ctx context.Context, idx int) {
 
 func (m *Manager) dial(ctx context.Context, idx int, kind byte) (*wire.Conn, error) {
 	d := net.Dialer{Timeout: dialTimeout}
-	raw, err := d.DialContext(ctx, "tcp", m.partners[idx].Address)
+	s := m.state[idx]
+	s.mu.Lock()
+	addr := s.addr
+	s.mu.Unlock()
+	raw, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +252,7 @@ func (m *Manager) controlLoop(ctx context.Context, s *partnerState, c *wire.Conn
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
-		t := time.NewTicker(pingEvery)
+		t := time.NewTicker(m.pingEvery)
 		defer t.Stop()
 		for {
 			select {
@@ -302,11 +320,7 @@ func (m *Manager) keepSpares(ctx context.Context, s *partnerState, gen int) {
 			c.Close()
 			return
 		}
-		select {
-		case s.spares <- c:
-		default:
-			c.Close()
-		}
+		s.spares <- c // never blocks: only this goroutine fills it, and it was below want
 		s.mu.Unlock()
 	}
 }
@@ -357,7 +371,7 @@ func (m *Manager) Open(ctx context.Context, idx int, t wire.Target) (net.Conn, b
 				return nil, 0, err
 			}
 		}
-		st, err := readStatus(c)
+		st, err := readStatus(c, m.statusTimeout)
 		if err != nil {
 			c.Close()
 			return nil, 0, err
@@ -381,13 +395,13 @@ func (m *Manager) Open(ctx context.Context, idx int, t wire.Target) (net.Conn, b
 	}
 	select {
 	case c := <-ch:
-		st, err := readStatus(c)
+		st, err := readStatus(c, m.statusTimeout)
 		if err != nil {
 			c.Close()
 			return nil, 0, err
 		}
 		return c, st, nil
-	case <-time.After(requestWait):
+	case <-time.After(m.requestWait):
 		return nil, 0, errors.New("partner did not attach")
 	case <-ctx.Done():
 		return nil, 0, ctx.Err()
@@ -456,7 +470,7 @@ func (m *Manager) serveStream(ctx context.Context, s *partnerState, c *wire.Conn
 // export connects the local target and pipes it to the partner stream c.
 func (m *Manager) export(ctx context.Context, s *partnerState, c *wire.Conn, t wire.Target) {
 	target, mt, st := m.exp.Connect(ctx, t, m.partners[s.idx].Networks.Allows)
-	_ = c.SetWriteDeadline(time.Now().Add(statusTimeout))
+	_ = c.SetWriteDeadline(time.Now().Add(m.statusTimeout))
 	if _, err := c.Write([]byte{st}); err != nil || st != wire.StatusOK {
 		result := "refused"
 		if err != nil {
@@ -496,8 +510,8 @@ func readFramed(r io.Reader) ([]byte, error) {
 	return p, err
 }
 
-func readStatus(c *wire.Conn) (byte, error) {
-	_ = c.SetReadDeadline(time.Now().Add(statusTimeout))
+func readStatus(c *wire.Conn, timeout time.Duration) (byte, error) {
+	_ = c.SetReadDeadline(time.Now().Add(timeout))
 	defer c.SetReadDeadline(time.Time{})
 	var b [1]byte
 	if _, err := io.ReadFull(c, b[:]); err != nil {

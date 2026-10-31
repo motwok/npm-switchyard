@@ -4,6 +4,7 @@ package importer
 
 import (
 	"context"
+	"os"
 	"syscall"
 	"time"
 )
@@ -11,14 +12,18 @@ import (
 // watchNPM re-reads NPM's files on every change in its directories (NPM-1). Directories NPM
 // has not created yet are picked up as soon as they appear.
 func (im *Importer) watchNPM(ctx context.Context) {
-	fd, err := syscall.InotifyInit1(syscall.IN_CLOEXEC)
+	poll := im.tune.npmPoll
+	// Non-blocking and wrapped in os.File: closing it interrupts a pending Read, a raw
+	// syscall.Read would block forever.
+	fd, err := im.tune.inotifyInit(syscall.IN_CLOEXEC | syscall.IN_NONBLOCK)
 	if err != nil {
 		im.log.Error("inotify", "err", err)
 		return
 	}
+	f := os.NewFile(uintptr(fd), "inotify")
 	go func() {
 		<-ctx.Done()
-		syscall.Close(fd)
+		f.Close()
 	}()
 	const mask = syscall.IN_CREATE | syscall.IN_DELETE | syscall.IN_MOVED_FROM | syscall.IN_MOVED_TO |
 		syscall.IN_CLOSE_WRITE
@@ -45,13 +50,13 @@ func (im *Importer) watchNPM(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(poll):
 			}
 		}
 	}()
 	buf := make([]byte, 64*1024)
 	for {
-		n, err := syscall.Read(fd, buf)
+		n, err := f.Read(buf)
 		if err != nil || n <= 0 {
 			return
 		}
@@ -61,3 +66,5 @@ func (im *Importer) watchNPM(ctx context.Context) {
 		im.syncShort()
 	}
 }
+
+func inotifyInit1(flags int) (int, error) { return syscall.InotifyInit1(flags) }

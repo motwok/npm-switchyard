@@ -132,3 +132,29 @@ func TestFull(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestShortNames(t *testing.T) {
+	p, own := pool(t)
+	tb := NewTable(p, own, nil)
+	tb.Short("a.hb.switchyard", []int{1})
+	tb.Long("b.2.hb.switchyard", 2)
+	if n := tb.ShortNames(); len(n) != 1 || n[0] != "a.hb.switchyard" {
+		t.Fatal(n)
+	}
+	if _, ok := tb.FreeShort("b.2.hb.switchyard", time.Now()); ok {
+		t.Fatal("long name freed")
+	}
+	if _, ok := tb.FreeShort("missing", time.Now()); ok {
+		t.Fatal("unknown name freed")
+	}
+	if name, conflict := tb.Joined(own); conflict || name != "" {
+		t.Fatal("own address is no conflict")
+	}
+	c, _, _ := tb.Long("c.2.hb.switchyard", 2) // collision IP
+	if _, conflict := tb.Joined(c.Addr); !conflict {
+		t.Fatal("collision IP conflict")
+	}
+	if _, err := NewPool(netip.MustParsePrefix("fd00::/64"), netip.Prefix{}, nil); err == nil {
+		t.Fatal("IPv6 subnet accepted")
+	}
+}
