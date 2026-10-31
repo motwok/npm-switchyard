@@ -1,0 +1,66 @@
+# Two agents on one Docker host: "a" imports, "b" exports (TST-2).
+name: sy-it
+
+networks:
+  imp:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+          ip_range: 172.28.0.128/25
+  link: {}
+  tgt: {}
+  loc: {}
+
+services:
+  b:
+    image: ${IMAGE}
+    environment:
+      SWITCHYARD_CONFIG: |
+        log_level: debug
+        partners:
+          - name: a
+            psk: "dGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXk="
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [link, tgt]
+
+  a:
+    image: ${IMAGE}
+    cap_add: [NET_ADMIN]
+    environment:
+      SWITCHYARD_CONFIG: |
+        log_level: debug
+        import_network: sy-it_imp
+        partners:
+          - name: b
+            address: b:9481
+            psk: "dGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXktdGVzdC1rZXk="
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      imp:
+        ipv4_address: 172.28.0.2
+      link: {}
+      loc: {}
+
+  web:
+    image: traefik/whoami:v1.11
+    networks: [tgt]
+
+  localweb:
+    image: traefik/whoami:v1.11
+    networks: [loc]
+
+  udpecho:
+    image: alpine:3.22
+    command: ["sh", "-c", "apk add -q socat && socat UDP4-RECVFROM:9999,fork EXEC:cat"]
+    networks: [tgt]
+
+  client:
+    image: alpine:3.22
+    command: ["sleep", "infinity"]
+    dns: [172.28.0.2]
+    networks: [imp]
+    depends_on:
+      a:
+        condition: service_healthy

@@ -1,0 +1,171 @@
+name: Build
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          [ -z "$out" ] || { echo "$out"; exit 1; }
+      - run: go vet ./...
+      - run: GOOS=windows go vet ./...
+      - run: go test -race ./...
+      - name: Cross build
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/switchyard
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/switchyard
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/switchyard
+
+  integration:
+    name: Integration (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build test image
+        run: docker build -t switchyard:test .
+      - name: Integration test
+        run: IMAGE=switchyard:test sh tests/integration/run.sh
+
+  npm:
+    name: NPM integration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build test image
+        run: docker build -t switchyard:test .
+      - name: NPM integration test
+        run: IMAGE=switchyard:test sh tests/npm/run.sh
+
+  windows:
+    name: Windows (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            os: ltsc2022
+          - runner: windows-2025
+            os: ltsc2025
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Docker engine
+        shell: pwsh
+        run: |
+          Get-Service docker -ErrorAction SilentlyContinue | Format-List Name,Status,StartType
+          Get-WindowsFeature Containers -ErrorAction SilentlyContinue | Format-List Name,InstallState
+          if (Get-Service docker -ErrorAction SilentlyContinue) { Start-Service docker }
+          docker version
+      - name: Build
+        shell: bash
+        run: CGO_ENABLED=0 go build -o switchyard.exe ./cmd/switchyard
+      - name: Image
+        run: docker build -f Dockerfile.windows --build-arg OSVERSION=${{ matrix.os }} -t switchyard:test .
+      - name: Smoke test (pipe access, /metrics)
+        shell: bash
+        run: |
+          docker run -d --name sy --isolation process \
+            --mount 'type=npipe,src=\\.\pipe\docker_engine,dst=\\.\pipe\docker_engine' \
+            -e SWITCHYARD_CONFIG='log_level: debug' switchyard:test
+          for i in $(seq 1 30); do
+            if docker exec sy 'C:\switchyard.exe' health; then docker logs sy; exit 0; fi
+            sleep 2
+          done
+          docker logs sy
+          exit 1
+
+  release:
+    name: Release
+    if: github.event_name == 'push'
+    needs: [unit, integration, npm, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Image changed since last release?
+        id: changed
+        run: |
+          last=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -z "$last" ] || ! git diff --quiet "$last" HEAD -- '*.go' go.mod go.sum Dockerfile Dockerfile.windows; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "No image-relevant change since $last, no release." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Publish release
+        id: drafter
+        if: steps.changed.outputs.release == 'true'
+        uses: release-drafter/release-drafter@v7
+        with:
+          config-name: release-drafter.yml
+          publish: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-go@v6
+        if: steps.changed.outputs.release == 'true'
+        with:
+          go-version-file: go.mod
+      - uses: docker/setup-buildx-action@v4
+        if: steps.changed.outputs.release == 'true'
+      - uses: docker/login-action@v4
+        if: steps.changed.outputs.release == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Linux images
+        if: steps.changed.outputs.release == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          build-args: VERSION=${{ steps.drafter.outputs.resolved_version }}
+          tags: ghcr.io/motwok/npm-switchyard:${{ steps.drafter.outputs.resolved_version }}-linux
+      - name: Windows images and manifest list
+        if: steps.changed.outputs.release == 'true'
+        env:
+          V: ${{ steps.drafter.outputs.resolved_version }}
+          IMG: ghcr.io/motwok/npm-switchyard
+        run: |
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$V" \
+            -o switchyard.exe ./cmd/switchyard
+          refs="$IMG:$V-linux"
+          for os in 1809 ltsc2022 ltsc2025; do
+            docker buildx build --platform windows/amd64 -f Dockerfile.windows --build-arg OSVERSION=$os \
+              --provenance=false --push -t "$IMG:$V-windows-$os" .
+            refs="$refs $IMG:$V-windows-$os"
+          done
+          docker buildx imagetools create -t "$IMG:$V" -t "$IMG:latest" $refs
