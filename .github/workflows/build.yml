@@ -165,27 +165,33 @@ jobs:
         run: |
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$V" \
             -o switchyard.exe ./cmd/switchyard
-          auth="Authorization: Bearer $(printf %s "$GH_TOKEN" | base64 -w0)"
-          files=""
           for os in 1809 ltsc2022 ltsc2025; do
-            ref="$IMG:$V-windows-$os"
             docker buildx build --platform windows/amd64 -f Dockerfile.windows --build-arg OSVERSION=$os \
-              --provenance=false --push -t "$ref" .
-            # Docker on Windows picks the variant by os.version, which buildx does not set.
-            # Digest and size come from the registry, as stored.
-            hdr=$(curl -fsSI -H "$auth" \
-              -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
-              "https://ghcr.io/v2/motwok/npm-switchyard/manifests/$V-windows-$os" | tr -d '\r')
-            digest=$(echo "$hdr" | sed -n 's/^docker-content-digest: //Ip')
-            size=$(echo "$hdr" | sed -n 's/^content-length: //Ip')
-            mt=$(echo "$hdr" | sed -n 's/^content-type: //Ip')
-            osv=$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}' | jq -r '."os.version"')
-            [ -n "$digest" ] && [ -n "$size" ] && [ -n "$osv" ] && [ "$osv" != null ] || { echo "no descriptor for $ref"; exit 1; }
-            jq -nc --arg mt "$mt" --arg d "$digest" --argjson s "$size" --arg v "$osv" \
-              '{mediaType: $mt, digest: $d, size: $s, platform: {architecture: "amd64", os: "windows", "os.version": $v}}' \
-              > "win-$os.json"
-            files="$files -f win-$os.json"
+              --provenance=false --sbom=false --push -t "$IMG:$V-windows-$os" .
           done
-          docker buildx imagetools create -t "$IMG:$V" -t "$IMG:latest" $files "$IMG:$V-linux"
-          docker buildx imagetools inspect "$IMG:$V" --raw | jq -e '[.manifests[] | select(.platform.os=="windows")
-            | .platform."os.version"] | length == 3 and all(. != null)'
+          # The index is written through the registry API: Docker on Windows picks the variant
+          # by os.version, which buildx and imagetools do not set.
+          api=https://ghcr.io/v2/motwok/npm-switchyard
+          tok=$(curl -fsS -u "${{ github.actor }}:$GH_TOKEN" \
+            "https://ghcr.io/token?scope=repository:motwok/npm-switchyard:pull,push" | jq -r .token)
+          get() { curl -fsS -H "Authorization: Bearer $tok" -H "Accept: $2" "$api/$1"; }
+          IDX=application/vnd.oci.image.index.v1+json
+          MAN=application/vnd.oci.image.manifest.v1+json
+          entries=$(get "manifests/$V-linux" "$IDX" | jq -c '[.manifests[] | select(.platform.os=="linux")]')
+          for os in 1809 ltsc2022 ltsc2025; do
+            get "manifests/$V-windows-$os" "$MAN" > m.json  # exact bytes for digest and size
+            digest="sha256:$(sha256sum < m.json | cut -d' ' -f1)"
+            size=$(wc -c < m.json)
+            cfg=$(jq -r .config.digest m.json)
+            osv=$(get "blobs/$cfg" '*/*' | jq -r '."os.version"')
+            [ -n "$osv" ] && [ "$osv" != null ] || { echo "no os.version for $os"; exit 1; }
+            entries=$(echo "$entries" | jq -c --arg d "$digest" --argjson s "$size" --arg v "$osv" --arg mt "$MAN" \
+              '. + [{mediaType: $mt, digest: $d, size: $s,
+                     platform: {architecture: "amd64", os: "windows", "os.version": $v}}]')
+          done
+          index=$(jq -nc --arg mt "$IDX" --argjson m "$entries" '{schemaVersion: 2, mediaType: $mt, manifests: $m}')
+          echo "$index" | jq .
+          for tag in "$V" latest; do
+            printf %s "$index" | curl -fsS -X PUT -H "Authorization: Bearer $tok" -H "Content-Type: $IDX" \
+              --data-binary @- "$api/manifests/$tag"
+          done
