@@ -66,7 +66,7 @@ sleep 2
 bm | grep -q "$active" || fail "open stream not counted"
 docker network disconnect sy-it_tgt "$(dc ps -q web)"
 sleep 2
-if bm | grep -q 'switchyard_streams_active{peer="a"'; then fail "stream not closed on opt-out"; fi
+if bm | grep -q "$active"; then fail "stream not closed on opt-out"; fi  # the UDP flow stays until its idle timeout
 if cli curl -fsS --max-time 10 http://web.80.b.switchyard/ >/dev/null 2>&1; then fail "opt-out"; fi
 
 dc down -v >/dev/null
