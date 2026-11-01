@@ -129,7 +129,7 @@ func run(path string) int {
 	var lvl slog.Level
 	_ = lvl.UnmarshalText([]byte(cfg.LogLevel))
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
-	log.Info("starting", "version", version, "partners", len(cfg.Partners), "import", cfg.ImportNetwork != "",
+	log.Info("starting", "version", version, "log_level", lvl, "partners", len(cfg.Partners), "import", cfg.ImportNetwork != "",
 		"public_key", config.PublicKeyString(cfg.Key))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -173,6 +173,12 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, dc *docker
 
 	met := metrics.New()
 	exp := export.New(dc, self.ID, cfg.ImportNetwork, log)
+	for _, p := range cfg.Partners {
+		exp.Scopes = append(exp.Scopes, export.Scope{Peer: p.Name, Allows: p.Networks.Allows})
+	}
+	if cfg.ImportNetwork != "" {
+		exp.Scopes = append(exp.Scopes, export.Scope{Peer: config.LocalPartner, Allows: cfg.LocalNetworks.Allows})
+	}
 	go exp.Run(ctx)
 
 	var wp []wire.Partner
@@ -290,19 +296,21 @@ func (o *opener) Open(ctx context.Context, p string, t wire.Target) (net.Conn, b
 		}
 		return o.mgr.Open(ctx, idx, t)
 	}
-	c, mt, st := o.exp.Connect(ctx, t, o.local.Allows)
+	id := wire.NewStreamID()
+	c, mt, st := o.exp.Connect(wire.WithStream(ctx, wire.StreamInfo{ID: id, Peer: p}), t, o.local.Allows)
 	if st != wire.StatusOK {
 		o.met.StreamResult(p, "refused", mt)
 		return nil, st, nil
 	}
 	o.met.StreamResult(p, "ok", mt)
 	o.met.StreamStarted(p, mt)
-	return &localConn{Conn: c, met: o.met, mt: mt, untrack: o.exp.Track(c, mt)}, st, nil
+	return &localConn{Conn: c, id: id, met: o.met, mt: mt, untrack: o.exp.Track(c, mt)}, st, nil
 }
 
 // localConn counts a local stream on the exporting side's labels (MET-1).
 type localConn struct {
 	net.Conn
+	id      string
 	met     *metrics.Registry
 	mt      metrics.Target
 	untrack func()
@@ -330,6 +338,9 @@ func (c *localConn) CloseWrite() error {
 
 // NetConn exposes the socket, so a reset can be passed on (TRN-2).
 func (c *localConn) NetConn() net.Conn { return c.Conn }
+
+// StreamID is the ID the exporter logged for this stream (LOG-3).
+func (c *localConn) StreamID() string { return c.id }
 
 func (c *localConn) Close() error {
 	c.once.Do(func() {

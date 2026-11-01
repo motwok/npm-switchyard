@@ -73,6 +73,7 @@ func (im *Importer) joined(ctx context.Context, id string) {
 	if err != nil {
 		return
 	}
+	im.log.Debug("container joined the import network", "container", c.DisplayName(), "addr", a)
 	im.reserve(a, c.DisplayName())
 }
 

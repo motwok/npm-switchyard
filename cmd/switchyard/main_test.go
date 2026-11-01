@@ -157,6 +157,9 @@ func TestOpenerLocal(t *testing.T) {
 	if err != nil || st != wire.StatusOK {
 		t.Fatal(err, st)
 	}
+	if len(c.(interface{ StreamID() string }).StreamID()) != 8 {
+		t.Fatal("local stream without ID")
+	}
 	_, _ = c.Write([]byte("hi"))
 	b := make([]byte, 2)
 	_, _ = io.ReadFull(c, b)

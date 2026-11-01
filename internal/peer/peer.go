@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/motwok/npm-switchyard/internal/config"
@@ -254,7 +255,7 @@ func (m *Manager) setControl(ctx context.Context, s *partnerState, c *wire.Conn)
 	if c.Dialer {
 		go m.keepSpares(ctx, s, gen)
 	}
-	m.controlLoop(ctx, s, c)
+	last, err := m.controlLoop(ctx, s, c)
 
 	s.mu.Lock()
 	if s.ctrl == c {
@@ -263,7 +264,8 @@ func (m *Manager) setControl(ctx context.Context, s *partnerState, c *wire.Conn)
 		closeSpares(s)
 		s.mu.Unlock()
 		m.met.SetPeerUp(s.name, false)
-		m.log.Warn("partner disconnected", "peer", s.name)
+		m.log.Warn("partner disconnected", "peer", s.name, "err", err,
+			"silent_for", time.Since(last).Round(time.Millisecond))
 		return
 	}
 	s.mu.Unlock()
@@ -281,8 +283,11 @@ func closeSpares(s *partnerState) {
 	s.spares = nil
 }
 
-func (m *Manager) controlLoop(ctx context.Context, s *partnerState, c *wire.Conn) {
+// controlLoop serves the control channel until it fails; it returns when the partner was last
+// heard and the error.
+func (m *Manager) controlLoop(ctx context.Context, s *partnerState, c *wire.Conn) (time.Time, error) {
 	defer c.Close()
+	last := time.Now()
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -307,8 +312,9 @@ func (m *Manager) controlLoop(ctx context.Context, s *partnerState, c *wire.Conn
 		_ = c.SetReadDeadline(time.Now().Add(deadAfter))
 		typ, p, err := wire.ReadMsg(c)
 		if err != nil {
-			return
+			return last, err
 		}
+		last = time.Now()
 		switch typ {
 		case wire.MsgPing:
 			_ = m.writeCtrl(s, c, wire.MsgPong, nil)
@@ -316,6 +322,7 @@ func (m *Manager) controlLoop(ctx context.Context, s *partnerState, c *wire.Conn
 		case wire.MsgRequest:
 			id, t, err := wire.UnmarshalRequest(p)
 			if err == nil && c.Dialer {
+				m.log.Debug("stream request received", "peer", s.name, "request", id, "name", t.Name, "port", t.Port)
 				go m.attach(ctx, s, id, t)
 			}
 		}
@@ -345,6 +352,7 @@ func (m *Manager) keepSpares(ctx context.Context, s *partnerState, gen int) {
 		}
 		c, err := m.dial(ctx, s.idx, wire.KindStream)
 		if err != nil {
+			m.log.Debug("spare connection failed", "peer", s.name, "err", err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -355,7 +363,9 @@ func (m *Manager) keepSpares(ctx context.Context, s *partnerState, gen int) {
 			return
 		}
 		s.spares <- c // never blocks: only this goroutine fills it, and it was below want
+		n := len(s.spares)
 		s.mu.Unlock()
+		m.log.Debug("spare connection ready", "peer", s.name, "spares", n)
 	}
 }
 
@@ -371,11 +381,13 @@ func (m *Manager) streamConn(ctx context.Context, s *partnerState) (*wire.Conn, 
 				ch = nil
 				continue
 			}
+			m.log.Debug("spare connection taken", "peer", s.name)
 			return c, nil
 		default:
 			ch = nil
 		}
 	}
+	m.log.Debug("no spare connection, dialing", "peer", s.name)
 	return m.dial(ctx, s.idx, wire.KindStream)
 }
 
@@ -423,6 +435,7 @@ func (m *Manager) Open(ctx context.Context, idx int, t wire.Target) (net.Conn, b
 	if err := m.writeCtrl(s, ctrl, wire.MsgRequest, wire.MarshalRequest(id, t)); err != nil {
 		return nil, 0, err
 	}
+	m.log.Debug("stream request sent", "peer", s.name, "request", id, "name", t.Name, "port", t.Port)
 	select {
 	case c := <-ch:
 		st, err := readStatus(c, m.statusTimeout)
@@ -513,6 +526,8 @@ func (m *Manager) serveStream(ctx context.Context, s *partnerState, c *wire.Conn
 
 // export connects the local target and pipes it to the partner stream c.
 func (m *Manager) export(ctx context.Context, s *partnerState, c *wire.Conn, t wire.Target) {
+	id := c.StreamID()
+	ctx = wire.WithStream(ctx, wire.StreamInfo{ID: id, Peer: s.name})
 	target, mt, st := m.exp.Connect(ctx, t, m.partners[s.idx].Networks.Allows)
 	_ = c.SetWriteDeadline(time.Now().Add(m.statusTimeout))
 	if _, err := c.Write([]byte{st}); err != nil || st != wire.StatusOK {
@@ -533,11 +548,30 @@ func (m *Manager) export(ctx context.Context, s *partnerState, c *wire.Conn, t w
 	defer m.met.StreamEnded(s.name, mt)
 	untrack := m.exp.Track(target, mt)
 	defer untrack()
-	if t.Proto == wire.UDP {
-		PipeUDPExport(c, target, func(dir string, n int64) { m.met.AddBytes(s.name, dir, mt, n) })
-		return
+	var bytes Bytes
+	count := func(dir string, n int64) {
+		m.met.AddBytes(s.name, dir, mt, n)
+		bytes.Add(dir, n)
 	}
-	Pipe(c, target, func(dir string, n int64) { m.met.AddBytes(s.name, dir, mt, n) })
+	start := time.Now()
+	if t.Proto == wire.UDP {
+		PipeUDPExport(c, target, count)
+	} else {
+		Pipe(c, target, count)
+	}
+	m.log.Debug("export closed", "stream", id, "peer", s.name, "name", t.Name, "port", t.Port,
+		"duration", time.Since(start).Round(time.Millisecond), "bytes_in", bytes.In.Load(), "bytes_out", bytes.Out.Load())
+}
+
+// Bytes sums a stream's traffic per direction for its closing log line.
+type Bytes struct{ In, Out atomic.Int64 }
+
+func (b *Bytes) Add(dir string, n int64) {
+	if dir == "in" {
+		b.In.Add(n)
+	} else {
+		b.Out.Add(n)
+	}
 }
 
 func framed(p []byte) []byte {

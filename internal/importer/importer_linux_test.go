@@ -124,7 +124,7 @@ func newImporter(t *testing.T) *Importer {
 		met:       metrics.New(),
 		open:      echoOpener{tcp, udp},
 		npm:       npmconf.NewStore(t.TempDir()),
-		fwd:       NewForwarder([]string{server(t, dns.RcodeSuccess)}),
+		fwd:       NewForwarder([]string{server(t, dns.RcodeSuccess)}, quiet),
 		ownNet:    map[string]bool{"db": true},
 		Own:       own,
 		bits:      24,
@@ -181,7 +181,7 @@ func TestDNSAnswers(t *testing.T) {
 
 func TestForwardFailure(t *testing.T) {
 	im := newImporter(t)
-	im.fwd = NewForwarder([]string{server(t, dns.RcodeServerFailure)})
+	im.fwd = NewForwarder([]string{server(t, dns.RcodeServerFailure)}, quiet)
 	if r := query(im, "example.org", dns.TypeA); r.Rcode != dns.RcodeServerFailure {
 		t.Fatalf("%v", r)
 	}
