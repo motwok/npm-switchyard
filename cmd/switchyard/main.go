@@ -54,24 +54,29 @@ func cli(args []string) int {
 	case "health":
 		return health(*cfgPath)
 	case "genkey":
-		fmt.Println(config.GenerateKey())
+		priv := config.GenerateKey()
+		k, _ := config.ParsePrivateKey(priv)
+		fmt.Printf("private_key: %s\npublic_key: %s\n", priv, config.PublicKeyString(k))
 		return 0
 	case "pubkey":
-		return pubkey()
+		return pubkey(fs.Arg(1))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", fs.Arg(0))
 		return 2
 	}
 }
 
-// pubkey prints the public key of the private key on stdin (CLI-4).
-func pubkey() int {
-	b, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
+// pubkey prints the public key of the private key given, else read from stdin (CLI-4).
+func pubkey(arg string) int {
+	if arg == "" {
+		b, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		arg = string(b)
 	}
-	k, err := config.ParsePrivateKey(string(b))
+	k, err := config.ParsePrivateKey(arg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "private key:", err)
 		return 1

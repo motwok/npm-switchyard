@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -60,15 +61,35 @@ func TestPubkey(t *testing.T) {
 	defer func() { os.Stdin = old }()
 	_, _ = w.WriteString(key + "\n")
 	w.Close()
-	if pubkey() != 0 {
+	if pubkey("") != 0 {
 		t.Fatal("pubkey failed")
+	}
+	if pubkey(key) != 0 || pubkey("nonsense") != 1 {
+		t.Fatal("pubkey argument")
 	}
 	r2, w2, _ := os.Pipe()
 	os.Stdin = r2
 	_, _ = w2.WriteString("nonsense")
 	w2.Close()
-	if pubkey() != 1 {
+	if pubkey("") != 1 {
 		t.Fatal("invalid key accepted")
+	}
+}
+
+func TestGenkey(t *testing.T) {
+	r, w, _ := os.Pipe()
+	old := os.Stdout
+	os.Stdout = w
+	code := cli([]string{"genkey"})
+	os.Stdout = old
+	w.Close()
+	out, _ := io.ReadAll(r)
+	var priv, pub string
+	if n, _ := fmt.Sscanf(string(out), "private_key: %s\npublic_key: %s\n", &priv, &pub); code != 0 || n != 2 {
+		t.Fatalf("exit %d: %q", code, out)
+	}
+	if k, err := config.ParsePrivateKey(priv); err != nil || config.PublicKeyString(k) != pub {
+		t.Fatalf("public key does not match: %q", out)
 	}
 }
 
@@ -257,6 +278,7 @@ func TestCLI(t *testing.T) {
 		want int
 	}{
 		"genkey":       {[]string{"genkey"}, 0},
+		"pubkey arg":   {[]string{"pubkey", key}, 0},
 		"unknown":      {[]string{"bogus"}, 2},
 		"bad flag":     {[]string{"-nope"}, 2},
 		"health":       {[]string{"-config", f, "health"}, 1},
@@ -330,7 +352,7 @@ func TestPubkeyReadError(t *testing.T) {
 	old := os.Stdin
 	os.Stdin = r
 	defer func() { os.Stdin = old }()
-	if pubkey() != 1 {
+	if pubkey("") != 1 {
 		t.Fatal("read error ignored")
 	}
 }

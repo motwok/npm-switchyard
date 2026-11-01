@@ -57,10 +57,11 @@ flowchart LR
 As with WireGuard, each agent has a private key and gives its public key to its partners:
 
 ```sh
-docker run --rm ghcr.io/motwok/npm-switchyard genkey > private.key
-docker run --rm -i ghcr.io/motwok/npm-switchyard pubkey < private.key
+docker run --rm ghcr.io/motwok/npm-switchyard genkey
 ```
 
+`genkey` prints both keys (`private_key: ...`, `public_key: ...`). `pubkey <private key>` prints the
+public key of an existing private key; without the argument it reads the private key from stdin.
 The private key goes into the agent's own `private_key`; the public key goes into the partner's entry
 for this agent (`public_key`). The public key identifies the partner; the partner name is only a local
 label and may differ on both sides. An agent may use a different own key for a single partner
@@ -133,6 +134,7 @@ services:
   npm:
     image: jc21/nginx-proxy-manager:latest
     dns: [172.30.0.2]
+    ports: ["80:80", "443:443", "81:81"]
     volumes:
       - npm_data:/data
       - npm_letsencrypt:/etc/letsencrypt
