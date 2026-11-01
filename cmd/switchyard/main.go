@@ -155,12 +155,14 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, dc *docker
 	}
 	var ownIPs []string
 	for _, ep := range self.NetworkSettings.Networks {
-		if ep.IPAddress != "" {
-			ownIPs = append(ownIPs, ep.IPAddress)
+		for _, ip := range []string{ep.IPAddress, ep.GlobalIPv6Address} {
+			if ip != "" {
+				ownIPs = append(ownIPs, ip)
+			}
 		}
 	}
 	if len(ownIPs) == 0 {
-		log.Error("own container has no IPv4 address")
+		log.Error("own container has no IP address")
 		return 1
 	}
 

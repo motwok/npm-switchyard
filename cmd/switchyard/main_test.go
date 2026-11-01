@@ -166,7 +166,8 @@ func freePort(t *testing.T) int {
 func TestServe(t *testing.T) {
 	f := dockertest.NewFake()
 	defer f.Close()
-	f.Set(dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{"apps": {NetworkID: "n1", IPAddress: "127.0.0.2"}}))
+	f.Set(dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{
+		"apps": {NetworkID: "n1", IPAddress: "127.0.0.2", GlobalIPv6Address: "::1"}}))
 	cfg, err := config.Parse([]byte("private_key: " + key + "\nlisten: " + strconv.Itoa(freePort(t)) +
 		"\nmetrics: " + strconv.Itoa(freePort(t)) + "\npartners:\n  - name: b\n    address: 127.0.0.1:1\n" +
 		"    public_key: iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=\n"))
@@ -194,6 +195,15 @@ func TestServe(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	for _, ip := range []string{"127.0.0.2", "::1"} {
+		for _, p := range []int{cfg.Listen, cfg.Metrics} {
+			c, err := net.Dial("tcp", net.JoinHostPort(ip, strconv.Itoa(p)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Close()
+		}
+	}
 	cancel()
 	if code := <-done; code != 0 {
 		t.Fatalf("exit %d", code)
@@ -219,7 +229,7 @@ func TestServeErrors(t *testing.T) {
 	}
 	f.Set(dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{"apps": {NetworkID: "n1"}}))
 	if serve(ctx, cfg, log, f.Client(), "self") != 1 {
-		t.Fatal("own container without IPv4 accepted")
+		t.Fatal("own container without IP accepted")
 	}
 
 	dead := docker.NewWithDialer(func(context.Context) (net.Conn, error) { return nil, io.EOF })
