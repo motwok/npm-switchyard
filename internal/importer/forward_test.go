@@ -1,28 +1,39 @@
 package importer
 
 import (
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
 )
+
+var quiet = slog.New(slog.DiscardHandler)
 
 func TestExtServers(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "resolv.conf")
 	_ = os.WriteFile(f, []byte("nameserver 127.0.0.11\n"+
 		"# Based on host file: '/etc/resolv.conf' (internal resolver)\n"+
 		"# ExtServers: [host(192.168.1.1) host(127.0.0.53) host(fd00::1) 9.9.9.9]\n"), 0o644)
-	got := ExtServers(f, false)
+	got, skipped := ExtServers(f, false)
 	if len(got) != 2 || got[0] != "192.168.1.1:53" || got[1] != "9.9.9.9:53" {
 		t.Fatalf("v4 only: %v", got)
 	}
-	if got := ExtServers(f, true); len(got) != 3 || got[1] != "[fd00::1]:53" {
+	if len(skipped) != 2 || skipped[0] != "127.0.0.53 (loopback)" || !strings.HasPrefix(skipped[1], "fd00::1 (IPv6") {
+		t.Fatalf("skipped: %v", skipped)
+	}
+	if got, _ := ExtServers(f, true); len(got) != 3 || got[1] != "[fd00::1]:53" {
 		t.Fatalf("with v6: %v", got)
 	}
-	if ExtServers(filepath.Join(t.TempDir(), "missing"), false) != nil {
+	if got, _ := ExtServers(filepath.Join(t.TempDir(), "missing"), false); got != nil {
 		t.Fatal("missing file")
+	}
+	_ = os.WriteFile(f, []byte("# ExtServers: [bogus]\n"), 0o644)
+	if got, skipped := ExtServers(f, false); got != nil || skipped[0] != "bogus (not an address)" {
+		t.Fatalf("bogus: %v %v", got, skipped)
 	}
 }
 
@@ -50,16 +61,16 @@ func server(t *testing.T, rcode int) string {
 func TestForwarder(t *testing.T) {
 	q := new(dns.Msg)
 	q.SetQuestion("example.org.", dns.TypeA)
-	f := NewForwarder([]string{server(t, dns.RcodeServerFailure), server(t, dns.RcodeRefused), server(t, dns.RcodeSuccess)})
+	f := NewForwarder([]string{server(t, dns.RcodeServerFailure), server(t, dns.RcodeRefused), server(t, dns.RcodeSuccess)}, quiet)
 	r := f.Exchange(q, false)
 	if r == nil || len(r.Answer) != 1 {
 		t.Fatalf("SERVFAIL and REFUSED must be skipped: %v", r)
 	}
-	nx := NewForwarder([]string{server(t, dns.RcodeNameError)})
+	nx := NewForwarder([]string{server(t, dns.RcodeNameError)}, quiet)
 	if r := nx.Exchange(q, false); r == nil || r.Rcode != dns.RcodeNameError {
 		t.Fatal("NXDOMAIN is a valid answer")
 	}
-	if NewForwarder([]string{server(t, dns.RcodeServerFailure)}).Exchange(q, false) != nil {
+	if NewForwarder([]string{server(t, dns.RcodeServerFailure)}, quiet).Exchange(q, false) != nil {
 		t.Fatal("all failed must give nil")
 	}
 }
@@ -78,7 +89,7 @@ func TestForwarderTCP(t *testing.T) {
 	defer s.Shutdown()
 	q := new(dns.Msg)
 	q.SetQuestion("example.org.", dns.TypeA)
-	if r := NewForwarder([]string{l.Addr().String()}).Exchange(q, true); r == nil || r.Rcode != dns.RcodeSuccess {
+	if r := NewForwarder([]string{l.Addr().String()}, quiet).Exchange(q, true); r == nil || r.Rcode != dns.RcodeSuccess {
 		t.Fatalf("tcp: %v", r)
 	}
 }
@@ -89,7 +100,7 @@ func TestForwarderUnreachable(t *testing.T) {
 	pc.Close() // nothing listens there any more
 	q := new(dns.Msg)
 	q.SetQuestion("example.org.", dns.TypeA)
-	if NewForwarder([]string{dead, server(t, dns.RcodeSuccess)}).Exchange(q, false) == nil {
+	if NewForwarder([]string{dead, server(t, dns.RcodeSuccess)}, quiet).Exchange(q, false) == nil {
 		t.Fatal("next server not tried")
 	}
 }

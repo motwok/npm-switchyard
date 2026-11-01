@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -59,7 +60,7 @@ func (im *Importer) watchNPM(ctx context.Context) {
 				added = true
 			}
 			if added {
-				im.npm.Reload()
+				im.reloadNPM()
 				im.syncShort()
 			}
 			select {
@@ -76,12 +77,15 @@ func (im *Importer) watchNPM(ctx context.Context) {
 			return
 		}
 		for _, ev := range inotifyEvents(buf[:n]) {
+			mu.Lock()
+			d, ok := dirs[ev.wd]
 			if ev.mask&syscall.IN_IGNORED == 0 {
+				mu.Unlock()
+				im.log.Debug("NPM file changed", "dir", d, "file", ev.name)
 				continue
 			}
 			// The directory is gone; the poll watches it again once it reappears.
-			mu.Lock()
-			if d, ok := dirs[ev.wd]; ok {
+			if ok {
 				delete(watched, d)
 				delete(dirs, ev.wd)
 				im.log.Info("NPM directory gone, waiting for it", "dir", d)
@@ -90,7 +94,7 @@ func (im *Importer) watchNPM(ctx context.Context) {
 		}
 		// NPM deletes, writes and renames in quick succession; settle briefly.
 		time.Sleep(200 * time.Millisecond)
-		im.npm.Reload()
+		im.reloadNPM()
 		im.syncShort()
 	}
 }
@@ -98,6 +102,7 @@ func (im *Importer) watchNPM(ctx context.Context) {
 type inotifyEvent struct {
 	wd   int32
 	mask uint32
+	name string
 }
 
 // inotifyEvents splits a read into its events (struct inotify_event: wd, mask, cookie, len,
@@ -105,11 +110,13 @@ type inotifyEvent struct {
 func inotifyEvents(b []byte) []inotifyEvent {
 	var out []inotifyEvent
 	for len(b) >= syscall.SizeofInotifyEvent {
+		end := min(len(b), syscall.SizeofInotifyEvent+int(binary.NativeEndian.Uint32(b[12:])))
 		out = append(out, inotifyEvent{
 			wd:   int32(binary.NativeEndian.Uint32(b[0:])),
 			mask: binary.NativeEndian.Uint32(b[4:]),
+			name: strings.TrimRight(string(b[syscall.SizeofInotifyEvent:end]), "\x00"),
 		})
-		b = b[min(len(b), syscall.SizeofInotifyEvent+int(binary.NativeEndian.Uint32(b[12:]))):]
+		b = b[end:]
 	}
 	return out
 }
