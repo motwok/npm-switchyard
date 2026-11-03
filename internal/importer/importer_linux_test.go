@@ -425,13 +425,17 @@ func TestSetup(t *testing.T) {
 	if _, err := Setup(ctx, f.Client(), "self", cfg, op, metrics.New(), log); err == nil {
 		t.Fatal("own IP on no interface accepted")
 	}
-	self("127.0.0.1")
+	f.Set(dockertest.Ctr("self", "agent", nil, map[string]docker.Endpoint{
+		"imp": {NetworkID: "n-imp", IPAddress: "127.0.0.1", Gateway: "127.0.0.2"}}))
 	im, err := Setup(ctx, f.Client(), "self", cfg, op, metrics.New(), log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if im.Own.String() != "127.0.0.1" || im.network != "imp" {
 		t.Fatal(im.Own, im.network)
+	}
+	if im.table.pool.Contains(netip.MustParseAddr("127.0.0.2")) {
+		t.Fatal("endpoint gateway in the pool")
 	}
 }
 
