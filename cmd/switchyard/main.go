@@ -173,11 +173,12 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, dc *docker
 
 	met := metrics.New()
 	exp := export.New(dc, self.ID, cfg.ImportNetwork, log)
+	exp.HostAddress = cfg.HostAddress
 	for _, p := range cfg.Partners {
-		exp.Scopes = append(exp.Scopes, export.Scope{Peer: p.Name, Allows: p.Networks.Allows})
+		exp.Scopes = append(exp.Scopes, export.Scope{Peer: p.Name, Allows: p.Allows})
 	}
 	if cfg.ImportNetwork != "" {
-		exp.Scopes = append(exp.Scopes, export.Scope{Peer: config.LocalPartner, Allows: cfg.LocalNetworks.Allows})
+		exp.Scopes = append(exp.Scopes, export.Scope{Peer: config.LocalPartner, Allows: cfg.LocalAllows})
 	}
 	go exp.Run(ctx)
 
@@ -205,7 +206,7 @@ func serve(ctx context.Context, cfg *config.Config, log *slog.Logger, dc *docker
 	ready := make(chan struct{})
 	errc := make(chan error, 2)
 	if cfg.ImportNetwork != "" {
-		im, err := importer.Setup(ctx, dc, self.ID, cfg, &opener{mgr: mgr, exp: exp, met: met, local: cfg.LocalNetworks}, met, log)
+		im, err := importer.Setup(ctx, dc, self.ID, cfg, &opener{mgr: mgr, exp: exp, met: met, local: cfg.LocalAllows}, met, log)
 		if err != nil {
 			log.Error("import", "err", err)
 			return 1
@@ -277,7 +278,7 @@ type opener struct {
 	mgr   *peer.Manager
 	exp   *export.Exporter
 	met   *metrics.Registry
-	local config.Networks
+	local func(network string) bool
 }
 
 func (o *opener) Known(p string) bool {
@@ -297,7 +298,7 @@ func (o *opener) Open(ctx context.Context, p string, t wire.Target) (net.Conn, b
 		return o.mgr.Open(ctx, idx, t)
 	}
 	id := wire.NewStreamID()
-	c, mt, st := o.exp.Connect(wire.WithStream(ctx, wire.StreamInfo{ID: id, Peer: p}), t, o.local.Allows)
+	c, mt, st := o.exp.Connect(wire.WithStream(ctx, wire.StreamInfo{ID: id, Peer: p}), t, o.local)
 	if st != wire.StatusOK {
 		o.met.StreamResult(p, "refused", mt)
 		return nil, st, nil

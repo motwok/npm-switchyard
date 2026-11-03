@@ -528,7 +528,7 @@ func (m *Manager) serveStream(ctx context.Context, s *partnerState, c *wire.Conn
 func (m *Manager) export(ctx context.Context, s *partnerState, c *wire.Conn, t wire.Target) {
 	id := c.StreamID()
 	ctx = wire.WithStream(ctx, wire.StreamInfo{ID: id, Peer: s.name})
-	target, mt, st := m.exp.Connect(ctx, t, m.partners[s.idx].Networks.Allows)
+	target, mt, st := m.exp.Connect(ctx, t, m.partners[s.idx].Allows)
 	_ = c.SetWriteDeadline(time.Now().Add(m.statusTimeout))
 	if _, err := c.Write([]byte{st}); err != nil || st != wire.StatusOK {
 		result := "refused"

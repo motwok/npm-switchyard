@@ -4,7 +4,9 @@ package export
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"net"
 	"slices"
@@ -13,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/motwok/npm-switchyard/internal/config"
 	"github.com/motwok/npm-switchyard/internal/docker"
 	"github.com/motwok/npm-switchyard/internal/metrics"
 	"github.com/motwok/npm-switchyard/internal/wire"
@@ -33,6 +36,9 @@ type Exporter struct {
 	selfID        string
 	importNetwork string // excluded (EXP-1)
 	log           *slog.Logger
+
+	// HostAddress is host_address; empty means the gateway (EXP-7).
+	HostAddress string
 
 	// Scopes are the partners and "local" with their network filters, for the log (LOG-3).
 	Scopes []Scope
@@ -141,7 +147,7 @@ func (e *Exporter) Refresh(ctx context.Context) error {
 	e.members, e.nets = members, nets
 	var drop []*tracked
 	for t := range e.streams {
-		if !allowed[[2]string{t.containerID, t.network}] {
+		if t.network != config.HostScope && !allowed[[2]string{t.containerID, t.network}] {
 			drop = append(drop, t)
 		}
 	}
@@ -283,6 +289,9 @@ func (e *Exporter) Connect(ctx context.Context, t wire.Target, allow func(networ
 	si := wire.StreamFrom(ctx)
 	log := e.log.With("stream", si.ID, "peer", si.Peer, "name", t.Name, "port", t.Port, "proto", network)
 	log.Debug("export request")
+	if strings.EqualFold(t.Name, config.HostName) && allow(config.HostScope) {
+		return e.connectHost(ctx, log, network, t.Port)
+	}
 	e.mu.Lock()
 	var cands []ref
 	var denied []string
@@ -320,6 +329,46 @@ func (e *Exporter) Connect(ctx context.Context, t wire.Target, allow func(networ
 	}
 	log.Debug("export connected")
 	return &refConn{Conn: conn, ref: r}, r.labels, wire.StatusOK
+}
+
+// connectHost reaches the Docker host (EXP-7).
+func (e *Exporter) connectHost(ctx context.Context, log *slog.Logger, network string, port uint16) (net.Conn, metrics.Target, byte) {
+	mt := metrics.Target{Container: config.HostName}
+	addr := e.HostAddress
+	if addr == "" {
+		ictx, cancel := context.WithTimeout(ctx, connectTimeout)
+		defer cancel()
+		var err error
+		if addr, err = e.gateway(ictx); err != nil {
+			log.Warn("export refused", "reason", "no gateway for the host", "err", err)
+			return nil, mt, wire.StatusNoTarget
+		}
+	}
+	log = log.With("container", config.HostName, "addr", addr)
+	d := net.Dialer{Timeout: connectTimeout}
+	conn, err := d.DialContext(ctx, network, net.JoinHostPort(addr, strconv.Itoa(int(port))))
+	if err != nil {
+		log.Warn("export refused", "reason", "connect failed", "err", err)
+		return nil, mt, wire.StatusUnreachable
+	}
+	log.Debug("export connected")
+	return &refConn{Conn: conn, ref: ref{network: config.HostScope, ip: addr, labels: mt}}, mt, wire.StatusOK
+}
+
+// gateway is the first IPv4 gateway of the agent's endpoints in name order; the network's
+// IPAM config lacks a gateway Docker picked itself.
+func (e *Exporter) gateway(ctx context.Context) (string, error) {
+	self, err := e.dc.Inspect(ctx, e.selfID)
+	if err != nil {
+		return "", err
+	}
+	nets := self.NetworkSettings.Networks
+	for _, name := range slices.Sorted(maps.Keys(nets)) {
+		if ip := net.ParseIP(nets[name].Gateway); ip != nil && ip.To4() != nil {
+			return nets[name].Gateway, nil
+		}
+	}
+	return "", errors.New("no IPv4 gateway in the agent's networks")
 }
 
 type refConn struct {

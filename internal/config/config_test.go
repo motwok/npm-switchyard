@@ -40,21 +40,22 @@ func TestOverride(t *testing.T) {
 
 func TestInvalid(t *testing.T) {
 	cases := map[string]string{
-		"no private key":  "partners: []\n",
-		"bad private key": "private_key: c2hvcnQ=\n",
-		"unknown key":     head + "bogus: 1\n",
-		"reserved name":   head + "partners:\n  - name: local\n    public_key: " + peer + "\n",
-		"port name":       head + "partners:\n  - name: \"8080\"\n    public_key: " + peer + "\n",
-		"bad label":       head + "partners:\n  - name: a_b\n    public_key: " + peer + "\n",
-		"twice":           head + "partners:\n  - name: a\n    public_key: " + peer + "\n  - name: a\n    public_key: " + peer2 + "\n",
-		"same key":        head + "partners:\n  - name: a\n    public_key: " + peer + "\n  - name: b\n    public_key: " + peer + "\n",
-		"no public key":   head + "partners:\n  - name: a\n",
-		"bad override":    head + "partners:\n  - name: a\n    public_key: " + peer + "\n    private_key: x\n",
-		"same ports":      head + "listen: 9000\nmetrics: 9000\n",
-		"port range":      head + "listen: 70000\n",
-		"no port":         head + "partners:\n  - name: a\n    address: hostb\n    public_key: " + peer + "\n",
-		"log level":       head + "log_level: loud\n",
-		"neg spares":      head + "partners:\n  - name: a\n    public_key: " + peer + "\n    spares: -1\n",
+		"no private key":   "partners: []\n",
+		"bad private key":  "private_key: c2hvcnQ=\n",
+		"unknown key":      head + "bogus: 1\n",
+		"reserved name":    head + "partners:\n  - name: local\n    public_key: " + peer + "\n",
+		"port name":        head + "partners:\n  - name: \"8080\"\n    public_key: " + peer + "\n",
+		"bad label":        head + "partners:\n  - name: a_b\n    public_key: " + peer + "\n",
+		"twice":            head + "partners:\n  - name: a\n    public_key: " + peer + "\n  - name: a\n    public_key: " + peer2 + "\n",
+		"same key":         head + "partners:\n  - name: a\n    public_key: " + peer + "\n  - name: b\n    public_key: " + peer + "\n",
+		"no public key":    head + "partners:\n  - name: a\n",
+		"bad host_address": head + "host_address: nope\n",
+		"bad override":     head + "partners:\n  - name: a\n    public_key: " + peer + "\n    private_key: x\n",
+		"same ports":       head + "listen: 9000\nmetrics: 9000\n",
+		"port range":       head + "listen: 70000\n",
+		"no port":          head + "partners:\n  - name: a\n    address: hostb\n    public_key: " + peer + "\n",
+		"log level":        head + "log_level: loud\n",
+		"neg spares":       head + "partners:\n  - name: a\n    public_key: " + peer + "\n    spares: -1\n",
 	}
 	for name, y := range cases {
 		if _, err := Parse([]byte(y)); err == nil {
@@ -105,5 +106,33 @@ func TestSourceFiles(t *testing.T) {
 	env := map[string]string{"SWITCHYARD_CONFIG_FILE": f}
 	if _, src, err := Source("", func(k string) string { return env[k] }); err != nil || src != f {
 		t.Fatal(src, err)
+	}
+}
+
+func TestHost(t *testing.T) {
+	two := "partners:\n  - name: a\n    public_key: " + peer + "\n  - name: b\n    public_key: " + peer2 + "\n"
+	c, err := Parse([]byte(head + two))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Partners[0].Allows(HostScope) || c.LocalAllows(HostScope) {
+		t.Fatal("host on by default")
+	}
+	if !c.Partners[0].Allows("any") || !c.LocalAllows("any") {
+		t.Fatal("networks")
+	}
+	c, err = Parse([]byte(head + "host: true\nlocal_host: false\nhost_address: 192.168.1.10\n" + two + "    host: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Partners[0].Allows(HostScope) || c.Partners[1].Allows(HostScope) || c.LocalAllows(HostScope) {
+		t.Fatal("overrides")
+	}
+	c, err = Parse([]byte(head + "local_host: true\n" + two))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.LocalAllows(HostScope) || c.Partners[0].Allows(HostScope) {
+		t.Fatal("local_host")
 	}
 }

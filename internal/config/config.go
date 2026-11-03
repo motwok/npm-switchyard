@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -19,6 +20,10 @@ const (
 	DefaultNPMData = "/npm"
 	DefaultSpares  = 2
 	LocalPartner   = "local"
+	// HostName is the pseudo container for the Docker host (EXP-7).
+	HostName = "host"
+	// HostScope is what Allows is asked for the pseudo container; never a Docker network name.
+	HostScope = "(host)"
 )
 
 type Partner struct {
@@ -28,9 +33,21 @@ type Partner struct {
 	PrivateKey string   `yaml:"private_key"` // overrides the global key for this partner
 	Spares     *int     `yaml:"spares"`
 	Networks   Networks `yaml:"networks"`
+	Host       *bool    `yaml:"host"`
 
-	Own  ed25519.PrivateKey `yaml:"-"` // own key towards this partner
-	Peer ed25519.PublicKey  `yaml:"-"`
+	HostOn bool               `yaml:"-"` // Host, else the global host
+	Own    ed25519.PrivateKey `yaml:"-"` // own key towards this partner
+	Peer   ed25519.PublicKey  `yaml:"-"`
+}
+
+// Allows reports whether this partner may reach the network, or the host for HostScope.
+func (p Partner) Allows(network string) bool { return allows(p.HostOn, p.Networks, network) }
+
+func allows(host bool, n Networks, network string) bool {
+	if network == HostScope {
+		return host
+	}
+	return n.Allows(network)
 }
 
 func (p Partner) SpareCount() int {
@@ -48,9 +65,21 @@ type Config struct {
 	LogLevel      string    `yaml:"log_level"`
 	PrivateKey    string    `yaml:"private_key"`
 	LocalNetworks Networks  `yaml:"local_networks"`
+	Host          bool      `yaml:"host"`
+	LocalHost     *bool     `yaml:"local_host"`
+	HostAddress   string    `yaml:"host_address"`
 	Partners      []Partner `yaml:"partners"`
 
 	Key ed25519.PrivateKey `yaml:"-"`
+}
+
+// LocalAllows is Partner.Allows for local names.
+func (c *Config) LocalAllows(network string) bool {
+	host := c.Host
+	if c.LocalHost != nil {
+		host = *c.LocalHost
+	}
+	return allows(host, c.LocalNetworks, network)
 }
 
 // Source resolves CFG-1: flag, then SWITCHYARD_CONFIG_FILE, then SWITCHYARD_CONFIG.
@@ -113,6 +142,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("private_key: %w", err)
 	}
 	c.Key = key
+	if c.HostAddress != "" && net.ParseIP(c.HostAddress) == nil {
+		return fmt.Errorf("host_address %q: not an IP address", c.HostAddress)
+	}
 	if err := c.LocalNetworks.validate(); err != nil {
 		return fmt.Errorf("local_networks: %w", err)
 	}
@@ -135,6 +167,10 @@ func (c *Config) validate() error {
 			return fmt.Errorf("partners %q and %q: same public_key", other, p.Name)
 		}
 		peers[string(p.Peer)] = p.Name
+		p.HostOn = c.Host
+		if p.Host != nil {
+			p.HostOn = *p.Host
+		}
 		p.Own = c.Key
 		if p.PrivateKey != "" {
 			if p.Own, err = ParsePrivateKey(p.PrivateKey); err != nil {

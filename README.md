@@ -46,6 +46,7 @@ flowchart LR
 | long | `nextcloud.8080.hostb.switchyard` | the number in the name |
 | short | `nextcloud.hostb.switchyard` | every forward port Nginx Proxy Manager uses for this name |
 | own host | `cadvisor.8080.local.switchyard` | containers on the agent's own host |
+| Docker host | `host.22.hostb.switchyard` | a port of the Docker host itself, only with `host: true` |
 
 - Names are read from the right: `switchyard`, the partner, then a port if the label is a number
   1..65535, the rest is the container. `www.example.org.8080.hostb.switchyard` is container
@@ -54,6 +55,8 @@ flowchart LR
   with the agent: container name, compose service name and other aliases, short ID, hostname, also as
   `<name>.<network>`. Case does not matter.
 - Several containers under one name (e.g. a scaled service): each connection goes to one of them.
+- `host` is the Docker host itself where `host: true` is set (see [The Docker host](#the-docker-host));
+  elsewhere it is an ordinary container name.
 - Names without `.switchyard` are forwarded unchanged to the DNS servers Docker would use.
 
 ## Setup
@@ -209,6 +212,18 @@ firewall:
 New-NetFirewallRule -DisplayName "npm-switchyard" -Direction Inbound -Protocol TCP -LocalPort 9481 -Action Allow
 ```
 
+### The Docker host
+
+With `host: true` the exporting agent offers the Docker host itself as the pseudo container `host`:
+`host.22.hostb.switchyard` reaches port 22 of `hostb`. Off by default; `partners[].host` overrides it
+per partner, `local_host` for `local` names. Where it is on, `host` always means the Docker host.
+
+- The agent connects to the gateway of one of its networks (e.g. `172.17.0.1`), or only to
+  `host_address` if set. Services bound only to `127.0.0.1` are not reachable; a service bound only to
+  one address needs that address as `host_address`.
+- The connection passes the host firewall: allow the agent's network for those ports, e.g.
+  `ufw allow from 172.17.0.0/16 to any port 22`.
+
 ## Configuration
 
 The YAML comes from the file given by `-config`, else from the file named in `SWITCHYARD_CONFIG_FILE`,
@@ -231,6 +246,10 @@ over `-config`: the health check reads the configuration the same way and does n
 | `partners[].networks.include` | all | networks whose containers this partner may reach (`*` wildcard) |
 | `partners[].networks.exclude` | none | networks this partner may not reach; wins over `include` |
 | `local_networks.include` / `.exclude` | all / none | the same for `local` names |
+| `host` | `false` | export the Docker host as `host` |
+| `partners[].host` | `host` | the same for this partner only |
+| `local_host` | `host` | the same for `local` names |
+| `host_address` | gateway | the Docker host's address for `host` |
 
 ## Monitoring
 
@@ -257,6 +276,7 @@ side, once its DNS server listens. A disconnected partner does not make it unhea
 - Only containers that share a network with the exporting agent are reachable, narrowed per partner by
   `networks.include` / `exclude`, connected by their address from the Docker API, never by a name
   resolved via DNS. The import network is never exported, and imported names are never exported again.
+  The only other target is the Docker host itself, and only with `host: true`.
 - The agent only reads the Docker API. See [SECURITY.md](SECURITY.md).
 
 ## Support Me
