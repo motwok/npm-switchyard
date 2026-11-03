@@ -142,7 +142,7 @@ func TestOpenerLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	met := metrics.New()
-	o := &opener{mgr: peer.New(nil, []config.Partner{{Name: "b"}}, exp, met, log), exp: exp, met: met}
+	o := &opener{mgr: peer.New(nil, []config.Partner{{Name: "b"}}, exp, met, log), exp: exp, met: met, local: (&config.Config{}).LocalAllows}
 	if !o.Known("local") || !o.Known("b") || o.Known("x") {
 		t.Fatal("Known")
 	}

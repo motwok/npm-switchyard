@@ -18,6 +18,7 @@ services:
       GOCOVERDIR: /cover
       SWITCHYARD_CONFIG: |
         log_level: debug
+        host: true
         private_key: "LLS0gQNA3cdq5h3gg1g/pqIrqUdEdkGu7dJIDQehz10="
         partners:
           - name: a
@@ -56,6 +57,12 @@ services:
   localweb:
     image: traefik/whoami:v1.11
     networks: [loc]
+
+  # A port of the Docker host itself (EXP-7).
+  hostweb:
+    image: traefik/whoami:v1.11
+    command: ["--port", "18080"]
+    network_mode: host
 
   udpecho:
     image: alpine:3.22
