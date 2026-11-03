@@ -26,6 +26,7 @@ services:
     volumes:
       - ${COVERDIR:?set COVERDIR}:/cover
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    extra_hosts: ["host.docker.internal:host-gateway"] # host via the name (EXP-7)
     networks: [link, tgt]
 
   a:
@@ -36,6 +37,7 @@ services:
       SWITCHYARD_CONFIG: |
         log_level: debug
         import_network: sy-it_imp
+        local_host: true
         private_key: "9Ktfb/WqyMKethZfu/jDpSVsAgFgwA7LGmggx6scHrk="
         partners:
           - name: b
