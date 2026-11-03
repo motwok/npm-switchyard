@@ -27,9 +27,11 @@ cli curl -fsS --max-time 10 http://sy-it-web-1.80.b.switchyard/ | grep -q Hostna
 echo "local name"
 cli curl -fsS --max-time 10 http://localweb.80.local.switchyard/ | grep -q Hostname || fail "local"
 
-echo "host via the gateway, off for local"
+echo "host via host.docker.internal (b) and via the gateway (local)"
 cli curl -fsS --max-time 10 http://host.18080.b.switchyard:18080/ | grep -q Hostname || fail "host"
-if cli curl -fsS --max-time 10 http://host.18080.local.switchyard:18080/ >/dev/null 2>&1; then fail "host off"; fi
+dc logs b | grep "export connected" | grep -q "via=host.docker.internal" || fail "host not via the name"
+cli curl -fsS --max-time 10 http://host.18080.local.switchyard:18080/ | grep -q Hostname || fail "host local"
+dc logs a | grep "export connected" | grep -q "via=gateway" || fail "host not via the gateway"
 
 echo "AAAA for a valid name is NOERROR without data"
 cli dig AAAA web.80.b.switchyard | grep -q "status: NOERROR" || fail "AAAA"

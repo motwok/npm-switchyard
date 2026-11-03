@@ -334,17 +334,14 @@ func (e *Exporter) Connect(ctx context.Context, t wire.Target, allow func(networ
 // connectHost reaches the Docker host (EXP-7).
 func (e *Exporter) connectHost(ctx context.Context, log *slog.Logger, network string, port uint16) (net.Conn, metrics.Target, byte) {
 	mt := metrics.Target{Container: config.HostName}
-	addr := e.HostAddress
-	if addr == "" {
-		ictx, cancel := context.WithTimeout(ctx, connectTimeout)
-		defer cancel()
-		var err error
-		if addr, err = e.gateway(ictx); err != nil {
-			log.Warn("export refused", "reason", "no gateway for the host", "err", err)
-			return nil, mt, wire.StatusNoTarget
-		}
+	ictx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
+	addr, via, err := e.hostAddr(ictx)
+	if err != nil {
+		log.Warn("export refused", "reason", "no address for the host", "err", err)
+		return nil, mt, wire.StatusNoTarget
 	}
-	log = log.With("container", config.HostName, "addr", addr)
+	log = log.With("container", config.HostName, "addr", addr, "via", via)
 	d := net.Dialer{Timeout: connectTimeout}
 	conn, err := d.DialContext(ctx, network, net.JoinHostPort(addr, strconv.Itoa(int(port))))
 	if err != nil {
@@ -353,6 +350,28 @@ func (e *Exporter) connectHost(ctx context.Context, log *slog.Logger, network st
 	}
 	log.Debug("export connected")
 	return &refConn{Conn: conn, ref: ref{network: config.HostScope, ip: addr, labels: mt}}, mt, wire.StatusOK
+}
+
+// dockerHost is the only name the exporter resolves (EXP-7); it comes from no request.
+const dockerHost = "host.docker.internal"
+
+// lookupHost resolves dockerHost, /etc/hosts included; a variable for tests.
+var lookupHost = net.DefaultResolver.LookupHost
+
+// hostAddr is host_address, else host.docker.internal, else the gateway; via names the source.
+func (e *Exporter) hostAddr(ctx context.Context) (addr, via string, err error) {
+	if e.HostAddress != "" {
+		return e.HostAddress, "host_address", nil
+	}
+	if addrs, err := lookupHost(ctx, dockerHost); err == nil {
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil && ip.To4() != nil {
+				return a, dockerHost, nil
+			}
+		}
+	}
+	addr, err = e.gateway(ctx)
+	return addr, "gateway", err
 }
 
 // gateway is the first IPv4 gateway of the agent's endpoints in name order; the network's

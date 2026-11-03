@@ -2,6 +2,7 @@ package export
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 
@@ -12,6 +13,38 @@ import (
 )
 
 func hostOn(n string) bool { return true }
+
+// The test machine may know host.docker.internal (Docker Desktop); tests that want it set it.
+func init() { lookupHost = noDockerHost }
+
+func noDockerHost(context.Context, string) ([]string, error) { return nil, errors.New("not found") }
+
+func TestHostDockerInternal(t *testing.T) {
+	port := target(t)
+	f, e := setup(t)
+	gateways(f, "", "")
+	defer func() { lookupHost = noDockerHost }()
+	lookupHost = func(_ context.Context, name string) ([]string, error) {
+		if name != "host.docker.internal" {
+			t.Errorf("resolved %q", name)
+		}
+		return []string{"::1", "127.0.0.1"}, nil
+	}
+	ctx := context.Background()
+	if _, _, st := e.Connect(ctx, wire.Target{Proto: wire.TCP, Port: port, Name: "host"}, hostOn); st != wire.StatusOK {
+		t.Fatalf("status %d", st)
+	}
+	// IPv6 only: the gateway is used, and there is none here.
+	lookupHost = func(context.Context, string) ([]string, error) { return []string{"::1"}, nil }
+	if _, _, st := e.Connect(ctx, wire.Target{Proto: wire.TCP, Port: port, Name: "host"}, hostOn); st != wire.StatusNoTarget {
+		t.Fatalf("ipv6 only: status %d", st)
+	}
+	// host_address wins.
+	e.HostAddress = "127.0.0.1"
+	if _, _, st := e.Connect(ctx, wire.Target{Proto: wire.TCP, Port: port, Name: "host"}, hostOn); st != wire.StatusOK {
+		t.Fatalf("host_address: status %d", st)
+	}
+}
 
 func gateways(f *dockertest.Fake, apps, imp string) {
 	f.Set(dockertest.Ctr("self0000000000", "agent", nil, map[string]docker.Endpoint{
