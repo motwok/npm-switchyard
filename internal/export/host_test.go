@@ -14,19 +14,17 @@ import (
 func hostOn(n string) bool { return true }
 
 func gateways(f *dockertest.Fake, apps, imp string) {
-	net := func(gw string) docker.Network {
-		var n docker.Network
-		n.IPAM.Config = []docker.IPAMConfig{{Gateway: gw}}
-		return n
-	}
-	f.Networks["n-apps"], f.Networks["n-imp"] = net(apps), net(imp)
+	f.Set(dockertest.Ctr("self0000000000", "agent", nil, map[string]docker.Endpoint{
+		"apps": {NetworkID: "n-apps", IPAddress: "127.0.0.2", Gateway: apps},
+		"imp":  {NetworkID: "n-imp", IPAddress: "127.0.0.3", Gateway: imp},
+	}))
 }
 
 func TestHostViaGateway(t *testing.T) {
 	port := target(t)
 	f, e := setup(t)
-	// apps comes first by name; its IPv6 gateway is skipped.
-	gateways(f, "::1", "127.0.0.1")
+	// apps comes first by name; its unusable gateway is skipped.
+	gateways(f, "fe80::1", "127.0.0.1")
 	// A container named host does not hide the Docker host.
 	f.Set(dockertest.Ctr("host0000000000", "host", nil,
 		map[string]docker.Endpoint{"apps": {NetworkID: "n-apps", IPAddress: "127.0.0.9", DNSNames: []string{"host"}}}))
@@ -81,11 +79,6 @@ func TestHostRefused(t *testing.T) {
 	gateways(f, "", "::1")
 	if st := try(e, hostOn); st != wire.StatusNoTarget {
 		t.Errorf("no gateway: status %d", st)
-	}
-	// Network unknown to the daemon.
-	_, e = setup(t)
-	if st := try(e, hostOn); st != wire.StatusNoTarget {
-		t.Errorf("network error: status %d", st)
 	}
 	// Own container cannot be inspected.
 	f, e = setup(t)

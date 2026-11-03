@@ -355,22 +355,17 @@ func (e *Exporter) connectHost(ctx context.Context, log *slog.Logger, network st
 	return &refConn{Conn: conn, ref: ref{network: config.HostScope, ip: addr, labels: mt}}, mt, wire.StatusOK
 }
 
-// gateway is the first IPv4 gateway of the agent's networks in name order.
+// gateway is the first IPv4 gateway of the agent's endpoints in name order; the network's
+// IPAM config lacks a gateway Docker picked itself.
 func (e *Exporter) gateway(ctx context.Context) (string, error) {
 	self, err := e.dc.Inspect(ctx, e.selfID)
 	if err != nil {
 		return "", err
 	}
-	names := slices.Sorted(maps.Keys(self.NetworkSettings.Networks))
-	for _, name := range names {
-		n, err := e.dc.Network(ctx, self.NetworkSettings.Networks[name].NetworkID)
-		if err != nil {
-			return "", err
-		}
-		for _, c := range n.IPAM.Config {
-			if ip := net.ParseIP(c.Gateway); ip != nil && ip.To4() != nil {
-				return c.Gateway, nil
-			}
+	nets := self.NetworkSettings.Networks
+	for _, name := range slices.Sorted(maps.Keys(nets)) {
+		if ip := net.ParseIP(nets[name].Gateway); ip != nil && ip.To4() != nil {
+			return nets[name].Gateway, nil
 		}
 	}
 	return "", errors.New("no IPv4 gateway in the agent's networks")
