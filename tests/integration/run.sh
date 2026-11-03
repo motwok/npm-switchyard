@@ -27,6 +27,7 @@ cli curl -fsS --max-time 10 http://sy-it-web-1.80.b.switchyard/ | grep -q Hostna
 echo "local name"
 cli curl -fsS --max-time 10 http://localweb.80.local.switchyard/ | grep -q Hostname || fail "local"
 
+docker network inspect sy-it_imp --format "{{json .IPAM}}"; docker inspect "$(dc ps -q a)" --format "{{json .NetworkSettings.Networks}}"; ip -4 addr | grep 172.28
 echo "host via the gateway, off for local"
 cli curl -fsS --max-time 10 http://host.18080.b.switchyard/ | grep -q Hostname || fail "host"
 if cli curl -fsS --max-time 10 http://host.18080.local.switchyard/ >/dev/null 2>&1; then fail "host off"; fi
