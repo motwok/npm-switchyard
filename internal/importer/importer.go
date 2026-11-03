@@ -120,8 +120,11 @@ func Setup(ctx context.Context, dc *docker.Client, selfID string, cfg *config.Co
 	}
 	var exclude []netip.Addr
 	exclude = append(exclude, own)
-	if g, err := netip.ParseAddr(ic.Gateway); err == nil {
-		exclude = append(exclude, g)
+	// The IPAM config lacks the gateway Docker picked itself; the endpoint has it.
+	for _, gw := range []string{ic.Gateway, ep.Gateway} {
+		if g, err := netip.ParseAddr(gw); err == nil {
+			exclude = append(exclude, g)
+		}
 	}
 	for _, a := range ic.AuxAddress {
 		if x, err := netip.ParseAddr(a); err == nil {

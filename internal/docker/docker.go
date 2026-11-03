@@ -79,6 +79,7 @@ func (c *Client) Version(ctx context.Context) (Version, error) {
 type Endpoint struct {
 	NetworkID         string   `json:"NetworkID"`
 	IPAddress         string   `json:"IPAddress"`
+	Gateway           string   `json:"Gateway"`
 	GlobalIPv6Address string   `json:"GlobalIPv6Address"`
 	Aliases           []string `json:"Aliases"`
 	DNSNames          []string `json:"DNSNames"`
