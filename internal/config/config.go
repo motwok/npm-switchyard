@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -19,7 +20,9 @@ const (
 	DefaultMetrics = 9480
 	DefaultNPMData = "/npm"
 	DefaultSpares  = 2
-	LocalPartner   = "local"
+	// DefaultLogThrottle is the throttle summary interval (LOG-6).
+	DefaultLogThrottle = Duration(60 * time.Second)
+	LocalPartner       = "local"
 	// HostName is the pseudo container for the Docker host (EXP-7).
 	HostName = "host"
 	// HostScope is what Allows is asked for the pseudo container; never a Docker network name.
@@ -63,6 +66,8 @@ type Config struct {
 	Metrics       int       `yaml:"metrics"`
 	NPMData       string    `yaml:"npm_data"`
 	LogLevel      string    `yaml:"log_level"`
+	LogTime       bool      `yaml:"log_time"`
+	LogThrottle   Duration  `yaml:"log_throttle"`
 	PrivateKey    string    `yaml:"private_key"`
 	LocalNetworks Networks  `yaml:"local_networks"`
 	Host          bool      `yaml:"host"`
@@ -99,7 +104,7 @@ func Source(flagPath string, getenv func(string) string) ([]byte, string, error)
 }
 
 func Parse(data []byte) (*Config, error) {
-	c := &Config{}
+	c := &Config{LogThrottle: DefaultLogThrottle}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(c); err != nil {
@@ -125,6 +130,9 @@ func (c *Config) validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("log_level %q: want debug, info, warn or error", c.LogLevel)
+	}
+	if c.LogThrottle < 0 {
+		return fmt.Errorf("log_throttle %s: negative", time.Duration(c.LogThrottle))
 	}
 	for _, p := range []struct {
 		name string
@@ -213,4 +221,16 @@ func ValidLabel(s string) bool {
 		}
 	}
 	return true
+}
+
+// Duration is a Go duration in YAML ("60s"); a bare 0 is allowed.
+type Duration time.Duration
+
+func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
+	v, err := time.ParseDuration(n.Value)
+	if err != nil {
+		return err
+	}
+	*d = Duration(v)
+	return nil
 }

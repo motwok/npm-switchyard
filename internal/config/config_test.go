@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 var (
@@ -18,7 +19,8 @@ func TestDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != 9481 || c.Metrics != 9480 || c.NPMData != "/npm" || c.LogLevel != "info" {
+	if c.Listen != 9481 || c.Metrics != 9480 || c.NPMData != "/npm" || c.LogLevel != "info" ||
+		c.LogTime || c.LogThrottle != DefaultLogThrottle {
 		t.Fatalf("defaults: %+v", c)
 	}
 	p := c.Partners[0]
@@ -55,6 +57,8 @@ func TestInvalid(t *testing.T) {
 		"port range":       head + "listen: 70000\n",
 		"no port":          head + "partners:\n  - name: a\n    address: hostb\n    public_key: " + peer + "\n",
 		"log level":        head + "log_level: loud\n",
+		"bad log_throttle": head + "log_throttle: soon\n",
+		"neg log_throttle": head + "log_throttle: -1s\n",
 		"neg spares":       head + "partners:\n  - name: a\n    public_key: " + peer + "\n    spares: -1\n",
 	}
 	for name, y := range cases {
@@ -134,5 +138,18 @@ func TestHost(t *testing.T) {
 	}
 	if !c.LocalAllows(HostScope) || c.Partners[0].Allows(HostScope) {
 		t.Fatal("local_host")
+	}
+}
+
+func TestLogKeys(t *testing.T) {
+	c, err := Parse([]byte(head + "log_time: true\nlog_throttle: 0\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.LogTime || c.LogThrottle != 0 {
+		t.Fatalf("log keys: %+v", c)
+	}
+	if c, _ = Parse([]byte(head + "log_throttle: 2m\n")); c.LogThrottle != Duration(2*time.Minute) {
+		t.Fatalf("log_throttle: %v", c.LogThrottle)
 	}
 }

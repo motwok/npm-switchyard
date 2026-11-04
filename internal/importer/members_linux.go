@@ -85,6 +85,6 @@ func (im *Importer) reserve(a netip.Addr, container string) {
 	im.mu.Unlock()
 	if conflict {
 		im.log.Error("container joined the import network with an address the agent uses",
-			"container", container, "addr", a, "name", name)
+			"container", container, "addr", a, "dns", name)
 	}
 }

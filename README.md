@@ -239,6 +239,8 @@ over `-config`: the health check reads the configuration the same way and does n
 | `metrics` | `9480` | port for `/metrics` |
 | `npm_data` | `/npm` | Nginx Proxy Manager's `/data`, mounted read-only, for short names |
 | `log_level` | `info` | `debug`, `info`, `warn`, `error` |
+| `log_time` | `false` | write `time=` (Docker already timestamps each line) |
+| `log_throttle` | `60s` | after three equal lines in a row, further repeats are counted and summed up at this interval; `0` turns it off |
 | `private_key` | | own private key from `genkey` |
 | `partners[].name` | | local label of the partner, a DNS label |
 | `partners[].address` | none | `host:port` to dial; without it the agent waits |
