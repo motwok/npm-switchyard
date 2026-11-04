@@ -23,6 +23,7 @@ import (
 	"github.com/motwok/npm-switchyard/internal/docker"
 	"github.com/motwok/npm-switchyard/internal/export"
 	"github.com/motwok/npm-switchyard/internal/importer"
+	"github.com/motwok/npm-switchyard/internal/logging"
 	"github.com/motwok/npm-switchyard/internal/metrics"
 	"github.com/motwok/npm-switchyard/internal/peer"
 	"github.com/motwok/npm-switchyard/internal/wire"
@@ -128,7 +129,7 @@ func run(path string) int {
 	}
 	var lvl slog.Level
 	_ = lvl.UnmarshalText([]byte(cfg.LogLevel))
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+	log := logging.New(os.Stdout, lvl, cfg.LogTime, time.Duration(cfg.LogThrottle))
 	log.Info("starting", "version", version, "log_level", lvl, "partners", len(cfg.Partners), "import", cfg.ImportNetwork != "",
 		"public_key", config.PublicKeyString(cfg.Key))
 

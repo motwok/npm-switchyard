@@ -66,11 +66,11 @@ func (f *Forwarder) Exchange(q *dns.Msg, tcp bool) *dns.Msg {
 	for _, s := range f.Servers {
 		r, _, err := c.Exchange(q, s)
 		if err != nil {
-			f.log.Debug("upstream dns failed", "server", s, "name", q.Question[0].Name, "err", err)
+			f.log.Debug("upstream dns failed", "server", s, "dns", strings.TrimSuffix(q.Question[0].Name, "."), "err", err)
 			continue
 		}
 		if r.Rcode == dns.RcodeServerFailure || r.Rcode == dns.RcodeRefused {
-			f.log.Debug("upstream dns failed", "server", s, "name", q.Question[0].Name, "rcode", dns.RcodeToString[r.Rcode])
+			f.log.Debug("upstream dns failed", "server", s, "dns", strings.TrimSuffix(q.Question[0].Name, "."), "rcode", dns.RcodeToString[r.Rcode])
 			continue
 		}
 		return r

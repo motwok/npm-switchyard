@@ -308,7 +308,7 @@ func (im *Importer) syncShort() {
 				for p := range e.Ports {
 					im.closeListener(netip.AddrPortFrom(e.Addr, uint16(p)))
 				}
-				im.log.Info("short name gone from NPM, in quarantine", "name", n)
+				im.log.Info("short name gone from NPM, in quarantine", "dns", n)
 			}
 			continue
 		}
@@ -330,14 +330,14 @@ func (im *Importer) reloadNPM() {
 		old, ok := im.npmSeen[n]
 		switch {
 		case !ok:
-			im.log.Debug("NPM short name added", "name", n, "ports", cur[n])
+			im.log.Debug("NPM short name added", "dns", n, "ports", cur[n])
 		case !slices.Equal(old, cur[n]):
-			im.log.Debug("NPM short name ports changed", "name", n, "ports", cur[n], "before", old)
+			im.log.Debug("NPM short name ports changed", "dns", n, "ports", cur[n], "before", old)
 		}
 	}
 	for _, n := range slices.Sorted(maps.Keys(im.npmSeen)) {
 		if _, ok := cur[n]; !ok {
-			im.log.Debug("NPM short name removed", "name", n)
+			im.log.Debug("NPM short name removed", "dns", n)
 		}
 	}
 	im.npmSeen = cur
@@ -358,16 +358,16 @@ func (im *Importer) handle(w dns.ResponseWriter, q *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetReply(q)
 	m.Authoritative = true
-	log := im.log.With("name", qn, "type", dns.TypeToString[q.Question[0].Qtype], "client", w.RemoteAddr())
+	log := im.log.With("dns", strings.TrimSuffix(qn, "."), "type", dns.TypeToString[q.Question[0].Qtype], "client", w.RemoteAddr())
 	e, isNew, reason := im.resolve(qn)
 	if e == nil {
-		log.Debug("dns", "result", "NXDOMAIN", "reason", reason)
+		log.Warn("dns", "result", "NXDOMAIN", "reason", reason)
 		m.Rcode = dns.RcodeNameError
 		m.Ns = []dns.RR{soa(ttlNegative)}
 		_ = w.WriteMsg(m)
 		return
 	}
-	log.Debug("dns", "result", "NOERROR", "addr", e.Addr, "new", isNew, "ports", slices.Sorted(maps.Keys(e.Ports)))
+	log.Debug("dns", "result", "SUCCESS", "addr", e.Addr, "new", isNew, "ports", slices.Sorted(maps.Keys(e.Ports)))
 	if q.Question[0].Qtype == dns.TypeA || q.Question[0].Qtype == dns.TypeANY {
 		m.Answer = []dns.RR{&dns.A{
 			Hdr: dns.RR_Header{Name: qn, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: ttlPositive},
@@ -396,7 +396,7 @@ func (im *Importer) forward(w dns.ResponseWriter, q *dns.Msg) {
 	own := im.ownNet[n]
 	im.mu.Unlock()
 	if own {
-		im.log.Debug("dns", "name", q.Question[0].Name, "result", "NXDOMAIN",
+		im.log.Debug("dns", "dns", n, "result", "NXDOMAIN",
 			"reason", "container in the agent's networks, not reachable for the client")
 		m := new(dns.Msg)
 		m.SetRcode(q, dns.RcodeNameError)
@@ -406,7 +406,7 @@ func (im *Importer) forward(w dns.ResponseWriter, q *dns.Msg) {
 	_, tcp := w.RemoteAddr().(*net.TCPAddr)
 	r := im.fwd.Exchange(q, tcp)
 	if r == nil {
-		im.log.Debug("dns", "name", q.Question[0].Name, "result", "SERVFAIL", "reason", "no upstream server answered")
+		im.log.Debug("dns", "dns", n, "result", "SERVFAIL", "reason", "no upstream server answered")
 		m := new(dns.Msg)
 		m.SetRcode(q, dns.RcodeServerFailure)
 		_ = w.WriteMsg(m)
@@ -495,12 +495,12 @@ func (im *Importer) setUp(e *Entry, newAddr bool, ports []int) bool {
 
 func (im *Importer) full(name string) {
 	im.met.SetAddressesFree(0)
-	im.log.Warn("no free address in the import network", "name", name)
+	im.log.Warn("no free address in the import network", "dns", name)
 }
 
 func (im *Importer) alias(e *Entry) bool {
 	if err := addAlias(im.ifIndex, e.Addr.AsSlice(), im.bits); err != nil {
-		im.log.Error("add address", "addr", e.Addr, "name", e.Name, "err", err)
+		im.log.Error("add address", "addr", e.Addr, "dns", e.Name, "err", err)
 		return false
 	}
 	return true
@@ -522,14 +522,14 @@ func (im *Importer) listenPorts(e *Entry, ports []int) (failed []int) {
 		}
 		tl, err := net.Listen("tcp", ap.String())
 		if err != nil {
-			im.log.Error("listen tcp", "addr", ap, "name", e.Name, "err", err)
+			im.log.Error("listen tcp", "addr", ap, "dns", e.Name, "err", err)
 			failed = append(failed, p)
 			continue
 		}
 		ul, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(ap))
 		if err != nil {
 			tl.Close()
-			im.log.Error("listen udp", "addr", ap, "name", e.Name, "err", err)
+			im.log.Error("listen udp", "addr", ap, "dns", e.Name, "err", err)
 			failed = append(failed, p)
 			continue
 		}
@@ -537,7 +537,7 @@ func (im *Importer) listenPorts(e *Entry, ports []int) (failed []int) {
 		n, _ := names.Parse(e.Name)
 		go im.acceptTCP(tl, n, p)
 		go im.serveUDP(ul, n, p)
-		im.log.Debug("listening", "addr", ap, "name", e.Name)
+		im.log.Debug("listening", "addr", ap, "dns", e.Name)
 	}
 	return failed
 }
@@ -575,7 +575,7 @@ func streamID(s net.Conn) string {
 func (im *Importer) serveTCP(c net.Conn, n names.Name, port int) {
 	ctx := context.Background()
 	start := time.Now()
-	log := im.log.With("name", n.String(), "port", port, "proto", "tcp", "client", c.RemoteAddr())
+	log := im.log.With("dns", n.String(), "port", port, "proto", "tcp", "client", c.RemoteAddr())
 	s, st, err := im.open.Open(ctx, n.Partner, im.target(n, port, wire.TCP))
 	if err != nil || st != wire.StatusOK {
 		if s != nil {
@@ -584,7 +584,7 @@ func (im *Importer) serveTCP(c net.Conn, n names.Name, port int) {
 		}
 		im.reset(c)
 		im.countRefused(n, err)
-		log.Debug("stream refused", "status", wire.StatusReason(st), "err", err)
+		log.Warn("stream refused", "status", wire.StatusReason(st), "err", err)
 		return
 	}
 	log = log.With("stream", streamID(s))
@@ -702,7 +702,7 @@ func (im *Importer) flowWrite(f *udpFlow, n names.Name, pkt []byte) {
 func (im *Importer) runFlow(u *net.UDPConn, n names.Name, port int, from netip.AddrPort, f *udpFlow, remove func()) {
 	local := n.Partner == config.LocalPartner
 	start := time.Now()
-	log := im.log.With("name", n.String(), "port", port, "proto", "udp", "client", from)
+	log := im.log.With("dns", n.String(), "port", port, "proto", "udp", "client", from)
 	s, st, err := im.open.Open(context.Background(), n.Partner, im.target(n, port, wire.UDP))
 	if err != nil || st != wire.StatusOK {
 		if s != nil {
@@ -714,7 +714,7 @@ func (im *Importer) runFlow(u *net.UDPConn, n names.Name, port int, from netip.A
 		f.mu.Unlock()
 		remove()
 		im.countRefused(n, err)
-		log.Debug("stream refused", "status", wire.StatusReason(st), "err", err)
+		log.Warn("stream refused", "status", wire.StatusReason(st), "err", err)
 		return
 	}
 	log = log.With("stream", streamID(s))

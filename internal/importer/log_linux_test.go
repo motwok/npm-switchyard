@@ -58,13 +58,13 @@ func TestLogDNSReasons(t *testing.T) {
 	query(im, "web.b.switchyard", dns.TypeA)
 	query(im, "db", dns.TypeA)
 	lb.waitFor(t,
-		`msg=dns name=`+name+` type=A client=`, `result=NOERROR addr=127.0.0.1 new=true ports=[`+strconv.Itoa(port)+`]`,
-		`msg=dns name=`+name+` type=AAAA client=`, `result=NOERROR addr=127.0.0.1 new=false`,
-		`name=b.switchyard. type=A client=:0 result=NXDOMAIN reason="not a valid switchyard name"`,
+		`msg=dns dns=`+strings.TrimSuffix(name, ".")+` type=A client=`, `result=SUCCESS addr=127.0.0.1 new=true ports=[`+strconv.Itoa(port)+`]`,
+		`msg=dns dns=`+strings.TrimSuffix(name, ".")+` type=AAAA client=`, `result=SUCCESS addr=127.0.0.1 new=false`,
+		`level=WARN msg=dns dns=b.switchyard type=A client=:0 result=NXDOMAIN reason="not a valid switchyard name"`,
 		`reason="unknown partner"`,
 		`reason="short name not used in NPM"`,
 		`reason="short name, but NPM files are not mounted"`,
-		`msg=dns name=db. result=NXDOMAIN reason="container in the agent's networks, not reachable for the client"`)
+		`level=DEBUG msg=dns dns=db result=NXDOMAIN reason="container in the agent's networks, not reachable for the client"`)
 }
 
 func TestLogNPMChanges(t *testing.T) {
@@ -83,9 +83,9 @@ func TestLogNPMChanges(t *testing.T) {
 	im.reloadNPM()
 	_ = os.Remove(filepath.Join(ph, "1.conf"))
 	im.reloadNPM()
-	lb.waitFor(t, `msg="NPM short name added" name=s.b.switchyard ports=[81]`,
-		`msg="NPM short name ports changed" name=s.b.switchyard ports=[82] before=[81]`,
-		`msg="NPM short name removed" name=s.b.switchyard`)
+	lb.waitFor(t, `msg="NPM short name added" dns=s.b.switchyard ports=[81]`,
+		`msg="NPM short name ports changed" dns=s.b.switchyard ports=[82] before=[81]`,
+		`msg="NPM short name removed" dns=s.b.switchyard`)
 }
 
 func TestLogStream(t *testing.T) {
@@ -101,8 +101,8 @@ func TestLogStream(t *testing.T) {
 	b := make([]byte, 2)
 	_, _ = c.Read(b)
 	c.Close()
-	lb.waitFor(t, `msg="stream opened" name=`+name+` port=`+strconv.Itoa(port)+` proto=tcp client=127.0.0.1:`,
-		`msg="stream closed" name=`+name, "bytes_in=2 bytes_out=2")
+	lb.waitFor(t, `msg="stream opened" dns=`+name+` port=`+strconv.Itoa(port)+` proto=tcp client=127.0.0.1:`,
+		`msg="stream closed" dns=`+name, "bytes_in=2 bytes_out=2")
 }
 
 type idConn struct{ net.Conn }
@@ -113,4 +113,19 @@ func TestStreamID(t *testing.T) {
 	if streamID(idConn{}) != "0a0b0c0d" || streamID(&net.TCPConn{}) != "" {
 		t.Fatal("streamID")
 	}
+}
+
+func TestLogStreamRefused(t *testing.T) {
+	im, lb := debugImporter(t)
+	port := freePort(t)
+	name := "nope." + strconv.Itoa(port) + ".b.switchyard"
+	query(im, name, dns.TypeA)
+	c, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := make([]byte, 1)
+	_, _ = c.Read(b)
+	c.Close()
+	lb.waitFor(t, `level=WARN msg="stream refused" dns=`+name+` port=`+strconv.Itoa(port)+` proto=tcp`, `status=`)
 }
